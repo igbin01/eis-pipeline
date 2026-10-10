@@ -6,3 +6,4 @@ data/raw/
 build/
 dist/
 .pytest_cache/
+scripts/demo_metrics.csv
