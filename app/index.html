@@ -1,0 +1,948 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EIS Pipeline</title>
+  <style>
+    :root {
+      --page-bg: #f7f8f9;
+      --panel-bg: #ffffff;
+      --text: #14202b;
+      --muted: #596978;
+      --soft: #e8eef3;
+      --line: #ccd7e2;
+      --pending: #728195;
+      --in-progress: #365d85;
+      --done: #287c4c;
+      --failed: #a8423b;
+      --shadow: rgba(18, 30, 50, 0.08);
+      --font: "Segoe UI", Roboto, Arial, sans-serif;
+  }
+
+  * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page-bg);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.45;
+    }
+
+    .app {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 16px;
+    }
+
+    h1 {
+      font-size: 26px;
+      margin: 0 0 16px;
+      font-weight: 600;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(330px, 420px) minmax(450px, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 2px 6px var(--shadow);
+      padding: 16px;
+    }
+
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    select,
+    input[type="file"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 4px;
+      padding: 9px 10px;
+      font-family: inherit;
+    }
+
+    .drop-zone {
+      border: 1px dashed var(--line);
+      background: #fbfdff;
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 110px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      transition: border-color 180ms ease, background 180ms ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .drop-zone.dragover {
+      border-color: var(--in-progress);
+      background: var(--soft);
+    }
+
+    .drop-zone .zone-text {
+      font-size: 12px;
+      line-height: 1.4;
+      text-align: center;
+    }
+
+    .drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+      z-index: 2;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: var(--text);
+      color: #fff;
+      border: none;
+      padding: 10px 14px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+      transition: transform 180ms ease, opacity 180ms ease, background 180ms ease;
+    }
+
+    button:hover {
+      opacity: 0.95;
+      transform: translateY(-1px);
+    }
+
+    button.secondary {
+      background: var(--in-progress);
+    }
+
+    button.warn {
+      background: var(--failed);
+    }
+
+    #fileList {
+      min-height: 72px;
+      border: 1px solid var(--line);
+      background: #fdfdfd;
+      border-radius: 4px;
+      padding: 8px;
+      max-height: 160px;
+      overflow: auto;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    #fileList.empty {
+      color: var(--muted);
+    }
+
+    .file-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .file-list li {
+      border-bottom: 1px solid var(--soft);
+      padding: 4px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .file-list li:last-child {
+      border-bottom: none;
+    }
+
+    .file-list .name {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .results {
+      min-width: 0;
+    }
+
+    .tracker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .tracker-row {
+      flex: 1 1 120px;
+      min-width: 110px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .tracker-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .tracker-state {
+      font-size: 11px;
+      color: var(--pending);
+      font-weight: 700;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tracker-state::before {
+      content: "";
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--pending);
+      transform: scale(0.9);
+    }
+
+    .tracker-row.pending .tracker-state {
+      color: var(--pending);
+    }
+
+    .tracker-row.pending .tracker-state::before {
+      background: var(--pending);
+    }
+
+    .tracker-row.in_progress .tracker-state {
+      color: var(--in-progress);
+    }
+
+    .tracker-row.in_progress .tracker-state::before {
+      background: var(--in-progress);
+    }
+
+    .tracker-row.done .tracker-state {
+      color: var(--done);
+    }
+
+    .tracker-row.done .tracker-state::before {
+      background: var(--done);
+    }
+
+    .tracker-row.failed .tracker-state {
+      color: var(--failed);
+    }
+
+    .tracker-row.failed .tracker-state::before {
+      background: var(--failed);
+    }
+
+    .fit-progress {
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 14px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #fitProgressText {
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .log-panel {
+      background: #0d1822;
+      color: #dce9f6;
+      min-height: 120px;
+      max-height: 180px;
+      overflow: auto;
+      padding: 12px;
+      border-radius: 6px;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      border: 1px solid var(--line);
+      margin-bottom: 14px;
+    }
+
+    .log-panel .log-line {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .failure-list {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      padding: 10px;
+      max-height: 160px;
+      overflow: auto;
+    }
+
+    .failure-list h3,
+    .metrics-heading {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 8px;
+    }
+
+    .failure-row {
+      padding: 8px 10px;
+      border-radius: 4px;
+      background: #fff6f6;
+      color: var(--failed);
+      border-left: 4px solid var(--failed);
+      font-size: 11px;
+      margin-bottom: 8px;
+    }
+
+    .failure-row .failure-stage {
+      font-weight: 700;
+    }
+
+    .failure-row .failure-message {
+      display: block;
+      margin-top: 4px;
+      color: var(--text);
+    }
+
+    .metrics-section,
+    .plots-section {
+      margin-top: 16px;
+    }
+
+    .metrics-table-wrap {
+      overflow: auto;
+      max-height: 280px;
+      border: 1px solid var(--line);
+      background: var(--panel-bg);
+      border-radius: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 7px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+
+    table tbody tr.failed-fit-row {
+      background: #fff6f6;
+      color: var(--failed);
+      border-left: 4px solid var(--failed);
+    }
+
+    table tbody tr.failed-fit-row td {
+      color: var(--failed);
+    }
+
+    .plot-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(250px, 1fr));
+      gap: 14px;
+      margin-top: 12px;
+    }
+
+    .plot-card {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      padding: 10px;
+      min-height: 220px;
+    }
+
+    .plot-card img {
+      width: 100%;
+      max-height: 280px;
+      object-fit: contain;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      background: #fff;
+      display: block;
+    }
+
+    .plot-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .plot-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <h1>EIS Pipeline</h1>
+
+  <div class="layout">
+    <section class="panel controls">
+      <div class="field">
+        <label for="modelSelect">Model</label>
+        <select id="modelSelect">
+          <option value="intact_coating">intact_coating</option>
+          <option value="degraded_coating" selected>degraded_coating</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="filePicker">Spectrum CSV files</label>
+        <div class="drop-zone" id="dropZone">
+          <input type="file" id="filePicker" accept=".csv,.txt" multiple />
+          <div class="zone-text">Drop spectra CSV files here<br />or click to browse</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="manifestPicker">Manifest CSV</label>
+        <div class="drop-zone" id="manifestDropZone">
+          <input type="file" id="manifestPicker" accept=".csv" />
+          <div class="zone-text">Drop manifest CSV here<br />or click to browse</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Selected files</label>
+        <div id="fileList" class="empty">No files selected</div>
+      </div>
+
+      <div class="button-row">
+        <button type="button" id="loadDemoBtn" class="secondary">Load demo data</button>
+        <button type="button" id="runBtn">Run</button>
+      </div>
+    </section>
+
+    <section class="panel results">
+      <div class="tracker" id="tracker">
+        <div class="tracker-row pending" data-stage-row="load">
+          <div class="tracker-label">Load</div>
+          <div class="tracker-state">pending</div>
+        </div>
+        <div class="tracker-row pending" data-stage-row="validate">
+          <div class="tracker-label">Validate</div>
+          <div class="tracker-state">pending</div>
+        </div>
+        <div class="tracker-row pending" data-stage-row="fit">
+          <div class="tracker-label">Fit</div>
+          <div class="tracker-state">pending</div>
+        </div>
+        <div class="tracker-row pending" data-stage-row="metrics">
+          <div class="tracker-label">Metrics</div>
+          <div class="tracker-state">pending</div>
+        </div>
+        <div class="tracker-row pending" data-stage-row="plot">
+          <div class="tracker-label">Plot</div>
+          <div class="tracker-state">pending</div>
+        </div>
+      </div>
+
+      <div class="fit-progress">
+        <span id="fitProgressText">No run started</span>
+      </div>
+
+      <div class="log-panel" id="logPanel">
+        <div class="log-line">ready</div>
+      </div>
+
+      <section class="failure-list hidden" id="failureList">
+        <h3>Failures</h3>
+        <div id="failureItems"></div>
+      </section>
+
+      <section class="metrics-section hidden" id="metricsSection">
+        <div class="metrics-heading">Metrics table</div>
+        <div class="metrics-table-wrap">
+          <table id="metricsTable"></table>
+        </div>
+      </section>
+
+      <section class="plots-section hidden" id="plotsSection">
+        <div class="plot-grid">
+          <div class="plot-card">
+            <div class="plot-title">Bode</div>
+            <img id="bodeImage" alt="Bode plot" />
+          </div>
+          <div class="plot-card">
+            <div class="plot-title">R_po vs. time</div>
+            <img id="rpoImage" alt="R_po vs. time" />
+          </div>
+        </div>
+      </section>
+    </section>
+  </div>
+</div>
+
+<script>
+  const trackerRows = {};
+  const stageOrder = ["load", "validate", "fit", "metrics", "plot"];
+  const stageDisplay = {
+    load: "Load",
+    validate: "Validate",
+    fit: "Fit",
+    metrics: "Metrics",
+    plot: "Plot",
+  };
+
+  function init() {
+    document.querySelectorAll("[data-stage-row]").forEach((row) => {
+      trackerRows[row.dataset.stageRow] = row;
+    });
+
+    const filePicker = document.getElementById("filePicker");
+    const manifestPicker = document.getElementById("manifestPicker");
+    const dropZone = document.getElementById("dropZone");
+    const manifestDropZone = document.getElementById("manifestDropZone");
+    const fileList = document.getElementById("fileList");
+
+    filePicker.addEventListener("change", () => {
+      updateFileList(filePicker.files);
+    });
+
+    manifestPicker.addEventListener("change", () => {
+      updateManifestInfo(manifestPicker.files);
+    });
+
+    [dropZone, manifestDropZone].forEach((zone) => {
+      zone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        zone.classList.add("dragover");
+      });
+      zone.addEventListener("dragleave", () => {
+        zone.classList.remove("dragover");
+      });
+    });
+
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        filePicker.files = e.dataTransfer.files;
+        updateFileList(filePicker.files);
+      }
+    });
+
+    manifestDropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      manifestDropZone.classList.remove("dragover");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        manifestPicker.files = e.dataTransfer.files;
+        updateManifestInfo(manifestPicker.files);
+      }
+    });
+
+    document.getElementById("loadDemoBtn").addEventListener("click", () => {
+      loadDemo();
+    });
+
+    document.getElementById("runBtn").addEventListener("click", () => {
+      runPipeline();
+    });
+
+    clearAll();
+  }
+
+  function updateFileList(files) {
+    const fileList = document.getElementById("fileList");
+    if (!files || files.length === 0) {
+      fileList.className = "empty";
+      fileList.textContent = "No files selected";
+      return;
+    }
+
+    fileList.className = "";
+    fileList.innerHTML = "";
+    const ul = document.createElement("ul");
+    ul.className = "file-list";
+    Array.from(files).forEach((file) => {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = file.name;
+      const size = document.createElement("span");
+      size.textContent = Math.round(file.size / 1024) + " KB";
+      li.appendChild(name);
+      li.appendChild(size);
+      ul.appendChild(li);
+    });
+    fileList.appendChild(ul);
+  }
+
+  function updateManifestInfo(files) {
+    if (files && files.length > 0) {
+      const manifestName = files[0].name;
+      document.getElementById("fileList").className = "";
+      const manifestNote = document.createElement("div");
+      manifestNote.style.fontSize = "11px";
+      manifestNote.style.color = "var(--muted)";
+      manifestNote.textContent = "Manifest: " + manifestName;
+      const list = document.getElementById("fileList");
+      if (!list.innerHTML || list.innerHTML.trim() === "No files selected") {
+        list.innerHTML = "";
+      }
+      list.appendChild(manifestNote);
+    }
+  }
+
+  function clearAll() {
+    stageOrder.forEach((stage) => {
+      setStage(stage, "pending");
+    });
+    setFitProgress("No run started");
+    document.getElementById("logPanel").innerHTML = "";
+    addLog("ready");
+    document.getElementById("failureList").classList.add("hidden");
+    document.getElementById("failureItems").innerHTML = "";
+    document.getElementById("metricsSection").classList.add("hidden");
+    document.getElementById("plotsSection").classList.add("hidden");
+    document.getElementById("metricsTable").innerHTML = "";
+    document.getElementById("bodeImage").src = "";
+    document.getElementById("rpoImage").src = "";
+  }
+
+  function setStage(stage, status) {
+    if (!trackerRows[stage]) {
+      return;
+    }
+    const row = trackerRows[stage];
+    row.className = "tracker-row " + status;
+    const state = row.querySelector(".tracker-state");
+    if (state) {
+      state.textContent = status === "in_progress" ? "in-progress" : status;
+    }
+  }
+
+  function setFitProgress(message) {
+    document.getElementById("fitProgressText").textContent = message;
+  }
+
+  function addLog(message) {
+    const log = document.getElementById("logPanel");
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.textContent = message;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function loadDemo() {
+    clearAll();
+    const fd = new FormData();
+    fd.append("use_demo_data", "1");
+    fd.append("model", document.getElementById("modelSelect").value);
+
+    fetch("/api/upload", {
+      method: "POST",
+      body: fd,
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.job_id) {
+          openRun(data.job_id);
+        } else if (data.error) {
+          addLog("upload error: " + data.error);
+        }
+      })
+      .catch((err) => {
+        addLog("upload error: " + err);
+      });
+  }
+
+  function runPipeline() {
+    clearAll();
+
+    const files = Array.from(document.getElementById("filePicker").files || []);
+    const manifestFile = document.getElementById("manifestPicker").files?.[0] || null;
+
+    if (!files.length && !manifestFile) {
+      addLog("no files selected");
+      return;
+    }
+
+    if (!manifestFile && files.length === 1) {
+      // single CSV route, keep backend shape flexible
+    }
+
+    if (manifestFile && files.length === 0) {
+      addLog("manifest selected without spectra files");
+      return;
+    }
+
+    const fd = new FormData();
+    fd.append("model", document.getElementById("modelSelect").value);
+
+    if (manifestFile) {
+      fd.append("manifest", manifestFile);
+    }
+
+    for (const f of files) {
+      fd.append("file", f);
+    }
+
+    fetch("/api/upload", {
+      method: "POST",
+      body: fd,
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.job_id) {
+          openRun(data.job_id);
+        } else if (data.error) {
+          addLog("upload error: " + data.error);
+        }
+      })
+      .catch((err) => {
+        addLog("upload error: " + err);
+      });
+  }
+
+  function openRun(jobId) {
+    if (window.eventSource) {
+      window.eventSource.close();
+    }
+
+    const es = new EventSource("/api/run/" + jobId);
+    window.eventSource = es;
+
+    es.addEventListener("update", (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        handleEvent(payload);
+      } catch (e) {
+        addLog("parse error: " + e);
+      }
+    });
+
+    es.onerror = () => {
+      addLog("stream closed");
+      es.close();
+    };
+  }
+
+  function handleEvent(payload) {
+    const stage = payload.stage;
+    const status = payload.status;
+    const message = payload.message || "";
+
+    if (stage && stageOrder.includes(stage)) {
+      if (status === "in_progress") {
+        setStage(stage, "in_progress");
+      } else if (status === "done") {
+        setStage(stage, "done");
+      } else if (status === "failed") {
+        setStage(stage, "failed");
+      }
+    }
+
+    if (payload.stage === "load" && payload.status === "done") {
+      addLog("load done: " + payload.message);
+    }
+
+    if (payload.stage === "validate" && payload.status === "failed") {
+      addFailure("validate", payload.message);
+      addLog("validate failed: " + payload.message);
+    }
+
+    if (payload.stage === "fit") {
+      if (payload.status === "in_progress") {
+        addLog("fit in progress");
+      }
+
+      if (payload.status === "done" || payload.status === "failed") {
+        const idx = Number(payload.index);
+        const total = Number(payload.total);
+        if (Number.isFinite(idx) && Number.isFinite(total)) {
+          const current = idx + 1;
+          const msg = payload.status === "failed"
+            ? "failed spectrum " + current + " of " + total + " — " + payload.message
+            : "fitting spectrum " + current + " of " + total;
+          setFitProgress(msg);
+          addLog(msg);
+        } else {
+          setFitProgress(payload.message || "fit update");
+        }
+      }
+
+      if (payload.status === "failed") {
+        addFailure("fit", payload.message, payload.index, payload.total, payload.immersion_time_h);
+      }
+    }
+
+    if (payload.stage === "metrics" && payload.status === "done") {
+      addLog("metrics complete");
+      renderMetrics(payload.metrics_table || []);
+      document.getElementById("metricsSection").classList.remove("hidden");
+    }
+
+    if (payload.stage === "plot" && payload.status === "done") {
+      addLog("plot complete");
+      if (payload.bode_image_png_base64) {
+        const img = document.getElementById("bodeImage");
+        img.src = "data:image/png;base64," + payload.bode_image_png_base64;
+      }
+      if (payload.rpo_vs_time_image_png_base64) {
+        const img = document.getElementById("rpoImage");
+        img.src = "data:image/png;base64," + payload.rpo_vs_time_image_png_base64;
+      }
+      document.getElementById("plotsSection").classList.remove("hidden");
+    }
+  }
+
+  function addFailure(stage, message, index = null, total = null, immersionTime = null) {
+    const failureList = document.getElementById("failureList");
+    const failureItems = document.getElementById("failureItems");
+    failureList.classList.remove("hidden");
+
+    const item = document.createElement("div");
+    item.className = "failure-row";
+    const title = document.createElement("span");
+    title.className = "failure-stage";
+    title.textContent = stage.toUpperCase();
+
+    const msg = document.createElement("span");
+    msg.className = "failure-message";
+
+    const specimen = (index !== null && total !== null)
+      ? " spectrum " + (Number(index) + 1) + " of " + total
+      : "";
+
+    msg.textContent = message + (immersionTime !== null ? " @ immersion_time_h=" + immersionTime : "") + specimen;
+
+    item.appendChild(title);
+    item.appendChild(msg);
+    failureItems.appendChild(item);
+  }
+
+  function renderMetrics(rows) {
+    const table = document.getElementById("metricsTable");
+    table.innerHTML = "";
+
+    if (!rows || rows.length === 0) {
+      return;
+    }
+
+    const headers = Object.keys(rows[0]);
+    const thead = document.createElement("thead");
+    const tr = document.createElement("tr");
+    headers.forEach((h) => {
+      const th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    rows.forEach((row) => {
+      const r = document.createElement("tr");
+      if (row.success === false) {
+        r.className = "failed-fit-row";
+      }
+      headers.forEach((h) => {
+        const cell = document.createElement("td");
+        const value = row[h];
+        if (typeof value === "number" && !Number.isFinite(value)) {
+          cell.textContent = "NaN";
+        } else if (typeof value === "boolean") {
+          cell.textContent = String(value);
+        } else {
+          cell.textContent = value === null ? "" : String(value);
+        }
+        r.appendChild(cell);
+      });
+      tbody.appendChild(r);
+    });
+    table.appendChild(tbody);
+  }
+
+  init();
+</script>
+</body>
+</html>
