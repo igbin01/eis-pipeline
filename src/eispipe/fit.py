@@ -191,6 +191,7 @@ def fit_spectrum(
     initial_guess=None,
     weighting: str = "modulus",
     bounds=None,
+    x_scale="jac",
 ) -> FitResult:
     """Fit one spectrum.
 
@@ -208,6 +209,12 @@ def fit_spectrum(
     bounds:
         ``(lower, upper)`` sequences passed straight to ``impedance.py``;
         default is its per-element bounds (``0..inf``, CPE exponent ``0..1``).
+    x_scale:
+        Parameter scaling passed to ``scipy.optimize.curve_fit`` via
+        ``impedance.py``. The default ``"jac"`` rescales by the Jacobian
+        column norms; without it the optimiser stalls when parameters span many
+        decades (e.g. a ~GOhm ``R_po`` next to a ~1e-9 ``Q_c``). Pass ``1.0``
+        for scipy's unscaled behaviour.
 
     Raises
     ------
@@ -230,6 +237,7 @@ def fit_spectrum(
             spec.Z,
             bounds=bounds,
             weight_by_modulus=(weighting == "modulus"),
+            x_scale=x_scale,
         )
     except Exception as exc:  # bad guess length / optimiser / linear-algebra failure
         raise RuntimeError(f"{cm.name} fit failed: {exc}") from exc
@@ -269,6 +277,7 @@ def fit_series(
     validate: bool = True,
     kk_kwargs: dict | None = None,
     bounds=None,
+    x_scale="jac",
     on_progress: Callable[[int, int, FitResult], None] | None = None,
 ) -> FitSeries:
     """Fit every spectrum in *series*.
@@ -285,6 +294,8 @@ def fit_series(
         never skipped.
     kk_kwargs:
         Extra keyword arguments for :func:`~eispipe.validate.kramers_kronig`.
+    x_scale:
+        Passed to :func:`fit_spectrum` for every spectrum.
     on_progress:
         Optional callback invoked after every spectrum has a ``FitResult`` in
         hand, with ``(index, total, result)``. The callback is a hook only and
@@ -304,7 +315,8 @@ def fit_series(
         guess = prev_params if (seed_from_previous and prev_params is not None) else None
         try:
             res = fit_spectrum(
-                spec, cm, initial_guess=guess, weighting=weighting, bounds=bounds
+                spec, cm, initial_guess=guess, weighting=weighting, bounds=bounds,
+                x_scale=x_scale,
             )
         except RuntimeError as exc:
             res = FitResult(
