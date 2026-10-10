@@ -22,6 +22,7 @@ Models
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -50,6 +51,96 @@ def _estimate_Rp(spec: Spectrum, Re: float) -> float:
     if not np.isfinite(span) or span <= 0:
         span = float(np.ptp(spec.Z.real))
     return max(span, 1.0e2)
+
+
+#: Minimum peak-to-flanking-valley height (in degrees of phase) required
+#: before :func:`_find_arc_boundary` accepts a candidate as a genuine
+#: separation between the two arcs, rather than a noise ripple.
+_MIN_ARC_SEPARATION_PROMINENCE_DEG = 5.0
+
+
+def _find_arc_boundary(phase_deg: np.ndarray) -> int | None:
+    """Index of the phase peak separating two nested RC arcs, or ``None``.
+
+    Both CPE branches of a two-time-constant spectrum drive the phase toward
+    0 deg at the high- and low-frequency ends and toward a more negative
+    extreme near each arc's own characteristic frequency; between the two
+    arcs the phase rises back toward 0 at a local maximum. That maximum,
+    unlike a local extremum in ``|Z''|``, stays visible even when the two
+    arcs' resistances differ by orders of magnitude, because phase is a
+    ratio (``atan2(Z'', Z')``) and so is insensitive to the huge difference
+    in the arcs' absolute scale that swamps a magnitude-based search.
+
+    Every interior local maximum is a candidate; the one is picked whose
+    prominence (drop to the lower of its two flanking minima) is largest,
+    and only accepted if that prominence clears
+    ``_MIN_ARC_SEPARATION_PROMINENCE_DEG`` -- small ripples from measurement
+    noise produce shallow local maxima near the sweep's ends (phase trends
+    toward 0 at both extremes anyway) that would otherwise be mistaken for a
+    genuine arc boundary.
+    """
+    if phase_deg.size < 5:
+        return None
+    is_local_max = (phase_deg[1:-1] > phase_deg[:-2]) & (phase_deg[1:-1] > phase_deg[2:])
+    candidates = np.flatnonzero(is_local_max) + 1
+    if candidates.size == 0:
+        return None
+
+    best_idx, best_prominence = None, 0.0
+    for idx in candidates:
+        left_min = float(np.min(phase_deg[:idx]))
+        right_min = float(np.min(phase_deg[idx:]))
+        prominence = float(phase_deg[idx]) - max(left_min, right_min)
+        if prominence > best_prominence:
+            best_idx, best_prominence = int(idx), prominence
+
+    if best_idx is None or best_prominence < _MIN_ARC_SEPARATION_PROMINENCE_DEG:
+        return None
+    return best_idx
+
+
+def _estimate_Rpo_Rct(spec: Spectrum, Re: float) -> tuple[float, float]:
+    """Split the low-frequency resistive span into a coating and a substrate share.
+
+    Used only for ``degraded_coating``'s two nested loops, where
+    :func:`_estimate_Rp`'s whole-span estimate is the wrong guess for
+    ``R_po`` alone: both CPEs approach open circuits at low frequency, so
+    that span is ``R_po + R_ct``, not ``R_po`` by itself. Coatings routinely
+    have ``R_ct`` orders of magnitude larger than ``R_po``, and conflating
+    them starts the optimiser orders of magnitude off -- it then often
+    converges to a spurious local minimum instead of the true one,
+    reproducible even at zero noise.
+
+    Instead, this looks for the frequency where the two arcs separate (see
+    :func:`_find_arc_boundary`) and uses ``Z'`` there, minus ``R_e``, as the
+    ``R_po`` estimate; ``R_ct`` takes the remainder of the whole span. If no
+    clear separation is found -- a single, undifferentiated arc, e.g. because
+    ``R_po`` and ``R_ct`` are actually close in magnitude -- this falls back
+    to splitting the whole span evenly between the two and emits a warning,
+    since that fallback is a much rougher starting point.
+    """
+    order = np.argsort(spec.freq)[::-1]
+    zr = spec.Z.real[order]
+    total_span = max(float(zr[-1]) - Re, 1.0e2)
+
+    phase_deg = np.degrees(np.angle(spec.Z[order]))
+    boundary = _find_arc_boundary(phase_deg)
+
+    if boundary is None:
+        warnings.warn(
+            "degraded_coating initial guess: no clear separation between the "
+            "coating and substrate arcs (single undifferentiated arc); "
+            "falling back to an even split of the low-frequency span between "
+            "R_po and R_ct",
+            stacklevel=3,
+        )
+        half_span = total_span / 2.0
+        return half_span, half_span
+
+    Rpo = float(zr[boundary]) - Re
+    Rpo = min(max(Rpo, 1.0), total_span * 0.95)
+    Rct = max(total_span - Rpo, 1.0)
+    return Rpo, Rct
 
 
 def _estimate_C(spec: Spectrum) -> float:
@@ -162,10 +253,10 @@ def _guess_intact(spec: Spectrum) -> list[float]:
 
 def _guess_degraded(spec: Spectrum) -> list[float]:
     Re = _estimate_Re(spec)
-    Rpo = _estimate_Rp(spec, Re)
+    Rpo, Rct = _estimate_Rpo_Rct(spec, Re)
     Cc = _estimate_C(spec)
     # R0, CPE1_0(=Q_c), CPE1_1(=n_c), R1(=R_po), CPE2_0(=Q_dl), CPE2_1(=n_dl), R2(=R_ct)
-    return [Re, Cc, 0.90, Rpo, max(100.0 * Cc, 1e-6), 0.80, max(10.0 * Rpo, 1e4)]
+    return [Re, Cc, 0.90, Rpo, max(100.0 * Cc, 1e-6), 0.80, Rct]
 
 
 INTACT_COATING = CircuitModel(

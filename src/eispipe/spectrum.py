@@ -54,8 +54,11 @@ class Spectrum:
     sample_id:
         Identifier for the coated panel / coupon.
     immersion_time_h:
-        Hours of electrolyte immersion at the time of measurement. ``0`` is the
-        dry / freshly-immersed baseline used as the water-uptake reference.
+        Hours of electrolyte immersion at the time of measurement. ``0`` is
+        the earliest-immersion spectrum, conventionally used as the
+        water-uptake reference -- it is not a dry-film measurement, so using
+        it as ``C_0`` underestimates uptake by whatever was absorbed before
+        this point (see :func:`eispipe.metrics.water_uptake`).
     area_cm2:
         Exposed electrode area in cm^2, used to area-normalise capacitance and
         resistance. Must be positive if given.
@@ -245,7 +248,11 @@ class SpectrumSeries:
 
     @property
     def baseline(self) -> Spectrum:
-        """Earliest-immersion spectrum -- the water-uptake reference (t0)."""
+        """Earliest-immersion spectrum, used as the water-uptake reference.
+
+        Not a dry-film measurement -- it is simply the first spectrum taken
+        after immersion, so any water absorbed before it is not captured.
+        """
         return self._spectra[0]
 
     # -- export -------------------------------------------------------

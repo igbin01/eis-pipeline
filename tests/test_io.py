@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,7 +18,7 @@ from eispipe.io import (
     load_series_by_pattern,
 )
 from eispipe.spectrum import Spectrum, SpectrumSeries
-from conftest import synth_coating
+from helpers import synth_coating
 
 
 def write_csv(path, freq, Z, *, cols=("freq", "Zreal", "Zimag"), negate_imag=False):
@@ -79,6 +81,27 @@ def test_load_csv_imag_sign_override(tmp_path):
 
     with pytest.raises(ValueError, match="imag_sign"):
         load_csv(p, imag_sign="weird")
+
+
+def test_load_csv_default_warns_on_bare_positive_imag_column(tmp_path):
+    # header is bare "Zimag" (no "-" marker), but values are -Im(Z), i.e.
+    # positive across the whole spectrum -- looks inductive under "auto".
+    freq, Z = synth_coating()
+    p = tmp_path / "s.csv"
+    write_csv(p, freq, Z, cols=("freq", "Zreal", "Zimag"), negate_imag=True)
+
+    with pytest.warns(UserWarning, match="inductive"):
+        load_csv(p)
+
+
+def test_load_csv_explicit_imag_sign_suppresses_warning(tmp_path):
+    freq, Z = synth_coating()
+    p = tmp_path / "s.csv"
+    write_csv(p, freq, Z, cols=("freq", "Zreal", "Zimag"), negate_imag=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_csv(p, imag_sign="as_measured")
 
 
 def test_load_csv_unknown_metadata_kwarg(tmp_path):

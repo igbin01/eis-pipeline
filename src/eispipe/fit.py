@@ -20,7 +20,7 @@ Two deliberate defaults:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Callable, Iterator
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,11 @@ from .spectrum import Spectrum, SpectrumSeries
 from .validate import kramers_kronig
 
 __all__ = ["FitResult", "FitSeries", "fit_spectrum", "fit_series"]
+
+
+def _chi2_norm(Z_data: np.ndarray, Z_fit: np.ndarray) -> float:
+    """Mean of ``|Z_data - Z_fit|^2 / |Z_data|^2``."""
+    return float(np.mean(np.abs(Z_data - Z_fit) ** 2 / np.abs(Z_data) ** 2))
 
 
 @dataclass
@@ -46,7 +51,16 @@ class FitResult:
     freq, Z_data, Z_fit:
         Input frequencies, measured impedance, fitted impedance.
     rmse:
-        Root-mean-square of ``|Z_data - Z_fit|`` (absolute, ohms).
+        Root-mean-square of ``|Z_data - Z_fit|`` (absolute, ohms). Not
+        comparable across a degradation series, where ``|Z|`` itself falls by
+        decades as the coating fails -- use ``chi2_norm`` for that instead.
+    chi2_norm:
+        Mean of ``|Z_data - Z_fit|^2 / |Z_data|^2``, i.e. the normalised
+        (modulus-relative) chi-squared. Because the fit itself is
+        modulus-weighted, this is the figure of merit that is actually
+        comparable across immersion times -- ``rmse`` is not, since it is an
+        absolute quantity in ohms and ``|Z|`` falls by decades over a
+        degradation series.
     weighting:
         ``"modulus"`` (fit residuals divided by ``|Z|``) or ``"none"``.
     success, message:
@@ -67,6 +81,7 @@ class FitResult:
     Z_data: np.ndarray
     Z_fit: np.ndarray
     rmse: float
+    chi2_norm: float
     weighting: str
     success: bool = True
     message: str = ""
@@ -79,12 +94,28 @@ class FitResult:
         """Impedance of the fitted circuit at *freq* (default: the fit grid)."""
         if not self.success:
             raise RuntimeError("fit did not succeed; no model to predict from")
+        if freq is None:
+            return self.Z_fit
         from impedance.models.circuits import CustomCircuit
 
-        cc = CustomCircuit(self.circuit, initial_guess=list(self.params.values()))
-        cc.parameters_ = np.array(list(self.params.values()), dtype=float)
-        cc.conf_ = np.array(list(self.param_errors.values()), dtype=float)
-        grid = self.freq if freq is None else np.asarray(freq, dtype=float)
+        cm = get_model(self.model_name)
+        missing_params = [n for n in cm.param_names if n not in self.params]
+        if missing_params:
+            raise ValueError(
+                f"params is missing {missing_params} required by {cm.param_names!r}"
+            )
+        missing_errors = [n for n in cm.param_names if n not in self.param_errors]
+        if missing_errors:
+            raise ValueError(
+                f"param_errors is missing {missing_errors} required by {cm.param_names!r}"
+            )
+        values = [self.params[n] for n in cm.param_names]
+        errors = [self.param_errors[n] for n in cm.param_names]
+
+        cc = CustomCircuit(self.circuit, initial_guess=values)
+        cc.parameters_ = np.array(values, dtype=float)
+        cc.conf_ = np.array(errors, dtype=float)
+        grid = np.asarray(freq, dtype=float)
         return cc.predict(grid)
 
     def to_row(self) -> dict:
@@ -95,6 +126,7 @@ class FitResult:
             "area_cm2": self.area_cm2,
             "model": self.model_name,
             "rmse": self.rmse,
+            "chi2_norm": self.chi2_norm,
             "success": self.success,
             "kk_passed": self.kk_passed,
         }
@@ -219,6 +251,7 @@ def fit_spectrum(
         Z_data=np.asarray(spec.Z, dtype=complex),
         Z_fit=np.asarray(Z_fit, dtype=complex),
         rmse=float(_rmse(Z_fit, spec.Z)),
+        chi2_norm=_chi2_norm(spec.Z, Z_fit),
         weighting=weighting,
         success=True,
         sample_id=spec.sample_id,
@@ -236,6 +269,7 @@ def fit_series(
     validate: bool = True,
     kk_kwargs: dict | None = None,
     bounds=None,
+    on_progress: Callable[[int, int, FitResult], None] | None = None,
 ) -> FitSeries:
     """Fit every spectrum in *series*.
 
@@ -251,6 +285,11 @@ def fit_series(
         never skipped.
     kk_kwargs:
         Extra keyword arguments for :func:`~eispipe.validate.kramers_kronig`.
+    on_progress:
+        Optional callback invoked after every spectrum has a ``FitResult`` in
+        hand, with ``(index, total, result)``. The callback is a hook only and
+        does not change the return value or stop the series when a single fit
+        fails.
 
     A spectrum whose optimiser fails yields a ``FitResult`` with
     ``success=False`` and the error message; the series continues.
@@ -259,8 +298,9 @@ def fit_series(
     kk_kwargs = kk_kwargs or {}
     results: list[FitResult] = []
     prev_params: list[float] | None = None
+    total = len(series)
 
-    for spec in series:
+    for index, spec in enumerate(series):
         guess = prev_params if (seed_from_previous and prev_params is not None) else None
         try:
             res = fit_spectrum(
@@ -276,6 +316,7 @@ def fit_series(
                 Z_data=np.asarray(spec.Z, dtype=complex),
                 Z_fit=np.full(spec.freq.shape, np.nan, dtype=complex),
                 rmse=float("nan"),
+                chi2_norm=float("nan"),
                 weighting=weighting,
                 success=False,
                 message=str(exc),
@@ -290,5 +331,8 @@ def fit_series(
         if res.success:
             prev_params = list(res.params.values())
         results.append(res)
+
+        if on_progress is not None:
+            on_progress(index, total, res)
 
     return FitSeries(results)

@@ -49,8 +49,8 @@ _PASSTHROUGH_META = tuple(f for f in META_FIELDS if f != "source_path")
 # column detection for load_csv
 # ---------------------------------------------------------------------------
 
-_FREQ_KEYS = {"freq", "frequency", "f", "fhz", "freqhz", "frequencyhz", "hz", "w", "omega"}
-_REAL_EXACT = {"zreal", "rez", "zprime", "zr", "zre", "real", "z"}
+_FREQ_KEYS = {"freq", "frequency", "f", "fhz", "freqhz", "frequencyhz", "hz"}
+_REAL_EXACT = {"zreal", "rez", "zprime", "zr", "zre", "real"}
 _IMAG_EXACT = {"zimag", "imz", "zi", "zii", "zim", "imag", "zdoubleprime", "zprimeprime"}
 
 
@@ -120,6 +120,27 @@ def _detect_column(columns: Sequence[str], kind: str) -> str:
         f"ambiguous {kind!r} column: {matches} in {list(columns)}; "
         f"pass the column name explicitly"
     )
+
+
+def _check_imag_sign_convention(Z: np.ndarray, path: Path, suggestion: str) -> None:
+    """Warn if more than half of ``Z.imag`` is positive (looks inductive).
+
+    A coating spectrum is capacitive (``Z.imag < 0``) across most of its
+    range; if most points are positive it usually means the imaginary column
+    actually stores ``-Im(Z)`` without the header indicating so. This never
+    corrects the data -- it only warns, since a genuinely inductive spectrum
+    is possible and the caller may already know their file's convention.
+    """
+    n = Z.size
+    if n and int(np.sum(Z.imag > 0)) > n / 2:
+        warnings.warn(
+            f"{path}: more than half the imaginary values are positive, i.e. "
+            f"the data looks inductive across most of the spectrum. This "
+            f"usually means the imaginary column stores -Im(Z) without "
+            f"indicating so in the header; consider passing {suggestion}.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _split_meta(kwargs: dict) -> dict:
@@ -194,6 +215,8 @@ def load_csv(
         zi = -zi
 
     Z = zr + 1j * zi
+    if imag_sign == "auto":
+        _check_imag_sign_convention(Z, path, suggestion='imag_sign="negate"')
     return Spectrum(freq=freq, Z=Z, source_path=str(path), **meta)
 
 
@@ -243,6 +266,8 @@ def load_instrument(
     Z = np.asarray(Z, dtype=complex)
     if negate_imaginary:
         Z = Z.real - 1j * Z.imag
+    else:
+        _check_imag_sign_convention(Z, path, suggestion="negate_imaginary=True")
 
     return Spectrum(freq=freq, Z=Z, source_path=str(path), **meta)
 
