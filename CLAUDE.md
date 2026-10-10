@@ -1,7 +1,6 @@
 eis-pipeline/
 ├── CLAUDE.md
 ├── pyproject.toml     # src-layout package "eispipe"; deps + [dev] extra
-├── requirements.txt   # full pinned env (machine-generated)
 ├── src/eispipe/
 │   ├── spectrum.py    # Spectrum / SpectrumSeries: metadata-carrying data types
 │   ├── io.py          # load CSV + instrument exports; crop / drop-inductive preprocessing
