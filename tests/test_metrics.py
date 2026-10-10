@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from eispipe.fit import FitResult, FitSeries
+from conftest import synth_degraded
+from eispipe.fit import FitResult, FitSeries, fit_series
 from eispipe.metrics import (
     breakpoint_frequency,
+    breakpoint_frequency_measured,
     coating_capacitance,
     cpe_to_capacitance,
     double_layer_capacitance,
     metrics_table,
+    ml_feature_table,
     water_uptake,
     water_uptake_series,
 )
+from eispipe.spectrum import Spectrum, SpectrumSeries
 
 
 # --------------------------------------------------------------------------
@@ -40,7 +45,7 @@ def test_cpe_argument_validation():
     with pytest.raises(ValueError, match="exactly one of R or omega_max"):
         cpe_to_capacitance(1e-6, 0.9)
     with pytest.raises(ValueError, match="exponent n"):
-        cpe_to_capacitance(1e-6, 1.5, R=1000.0)
+        cpe_to_capacitance(1e-6, 0.0, R=1000.0)
     with pytest.raises(ValueError, match="Q must be"):
         cpe_to_capacitance(-1e-6, 0.9, R=1000.0)
 
@@ -50,6 +55,14 @@ def test_cpe_degenerate_params_return_inf_not_raise():
     # not crash the metrics table.
     C = cpe_to_capacitance(1.0, 0.01, R=1e10)
     assert np.isinf(C)
+
+
+def test_cpe_n_above_one_warns_and_returns_nan():
+    # n slightly above 1 is common in real fits; one bad time point should not
+    # abort a whole series, so this warns instead of raising.
+    with pytest.warns(UserWarning, match="n=1.5"):
+        C = cpe_to_capacitance(1e-6, 1.5, R=1000.0)
+    assert np.isnan(C)
 
 
 # --------------------------------------------------------------------------
@@ -73,6 +86,7 @@ def _fit(t, *, model="degraded_coating", Qc=2e-7, nc=0.9, Rpo=8000.0,
         Z_data=np.zeros_like(freq, dtype=complex),
         Z_fit=np.zeros_like(freq, dtype=complex),
         rmse=1.0,
+        chi2_norm=0.0,
         weighting="modulus",
         success=ok,
         sample_id="P1",
@@ -160,6 +174,60 @@ def test_metrics_table_marks_failed_fit():
     df = metrics_table(fits)
     assert bool(df["success"].iloc[1]) is False
     assert np.isnan(df["C_c"].iloc[1])
+
+
+def test_ml_feature_table_has_flat_columns_and_na_then_diff_rates():
+    # Build a tiny degraded-series-style FitSeries from the shared synthetic helper.
+    specs = []
+    for idx, t in enumerate([0.0, 24.0, 72.0]):
+        freq, Z = synth_degraded(noise=0.0, seed=idx + 1)
+        specs.append(
+            Spectrum(freq, Z, sample_id="P1", immersion_time_h=t, area_cm2=7.07)
+        )
+    fits = fit_series(SpectrumSeries(specs), "degraded_coating", validate=False)
+
+    table = ml_feature_table(fits)
+
+    expected_cols = [
+        "immersion_time_h",
+        "R_po",
+        "C_c",
+        "n_c",
+        "chi2_norm",
+        "water_uptake_vol_frac",
+        "R_po_rate",
+        "C_c_rate",
+        "n_c_rate",
+        "chi2_norm_rate",
+        "water_uptake_vol_frac_rate",
+    ]
+    assert list(table.columns) == expected_cols
+    assert len(table) == len(fits)
+
+    # First row can't be diffed against a prior point, so its derivative columns
+    # must stay missing even if the series retains its normal time ordering.
+    for rate_col in [
+        "R_po_rate",
+        "C_c_rate",
+        "n_c_rate",
+        "chi2_norm_rate",
+        "water_uptake_vol_frac_rate",
+    ]:
+        assert pd.isna(table.loc[0, rate_col])
+
+    # On the second and later rows, the derivative columns are finite differences
+    # in the feature divided by the elapsed immersion-time gap in hours.
+    for row_idx in range(1, len(table)):
+        dt = table.loc[row_idx, "immersion_time_h"] - table.loc[row_idx - 1, "immersion_time_h"]
+        for base_col, rate_col in [
+            ("R_po", "R_po_rate"),
+            ("C_c", "C_c_rate"),
+            ("n_c", "n_c_rate"),
+            ("chi2_norm", "chi2_norm_rate"),
+            ("water_uptake_vol_frac", "water_uptake_vol_frac_rate"),
+        ]:
+            expected = (table.loc[row_idx, base_col] - table.loc[row_idx - 1, base_col]) / dt
+            assert table.loc[row_idx, rate_col] == pytest.approx(expected)
 
 
 def test_metrics_table_without_area_omits_normalised_columns():

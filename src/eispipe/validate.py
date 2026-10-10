@@ -127,20 +127,54 @@ def kramers_kronig(
     """
     from impedance.validation import linKK
 
+    # Fast validation of the input rather than trusting a downstream library
+    # routine that can see a zero point in |Z| and turn it into a silent divide
+    # or a library-specific ZeroDivisionError. Clean spectra should still return
+    # a proper pass/fail boolean, and broken spectra should produce a failed
+    # KKResult instead of aborting the series.
+    def _failed_result() -> KKResult:
+        return KKResult(
+            freq=np.asarray(spec.freq, dtype=float),
+            Z_fit=np.asarray(spec.Z, dtype=complex),
+            resid_real=np.asarray(np.full(spec.freq.shape, np.nan), dtype=float),
+            resid_imag=np.asarray(np.full(spec.freq.shape, np.nan), dtype=float),
+            M=0,
+            mu=float("nan"),
+            max_resid=float("nan"),
+            rms_resid=float("nan"),
+            threshold=float(threshold),
+            passed=False,
+            sample_id=spec.sample_id,
+            immersion_time_h=spec.immersion_time_h,
+        )
+
+    if spec.freq.size == 0:
+        return _failed_result()
+
+    if np.any(np.abs(spec.Z) == 0):
+        return _failed_result()
+
     # Two library-interaction workarounds, both scoped to this call:
     #  - linKK prints progress to stdout every 10 RC elements -> silence it.
     #  - impedance 1.7.1's eval_linKK builds a circuit string with repr() of
     #    NumPy scalars; under NumPy >= 2 that repr is "np.float64(...)", which
     #    then fails to eval. legacy='1.25' printing restores the bare-number
     #    repr it expects.
-    with contextlib.redirect_stdout(_io.StringIO()), np.printoptions(legacy="1.25"):
-        M, mu, Z_fit, resid_real, resid_imag = linKK(
-            spec.freq, spec.Z, c=c, max_M=max_M, fit_type=fit_type, add_cap=add_cap
-        )
+    try:
+        with contextlib.redirect_stdout(_io.StringIO()), np.printoptions(legacy="1.25"):
+            M, mu, Z_fit, resid_real, resid_imag = linKK(
+                spec.freq, spec.Z, c=c, max_M=max_M, fit_type=fit_type, add_cap=add_cap
+            )
+    except Exception:
+        return _failed_result()
 
     pooled = np.concatenate([np.abs(resid_real), np.abs(resid_imag)])
-    max_resid = float(np.max(pooled))
-    rms_resid = float(np.sqrt(np.mean(pooled**2)))
+    if pooled.size == 0:
+        max_resid = float("nan")
+        rms_resid = float("nan")
+    else:
+        max_resid = float(np.max(pooled))
+        rms_resid = float(np.sqrt(np.mean(pooled**2)))
 
     return KKResult(
         freq=np.asarray(spec.freq, dtype=float),

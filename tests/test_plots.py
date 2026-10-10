@@ -14,7 +14,8 @@ from eispipe import plots  # noqa: E402
 from eispipe.fit import fit_spectrum  # noqa: E402
 from eispipe.spectrum import Spectrum, SpectrumSeries  # noqa: E402
 from eispipe.validate import kramers_kronig  # noqa: E402
-from conftest import synth_coating, synth_degraded  # noqa: E402
+from conftest import synth_degraded  # noqa: E402
+from helpers import synth_coating  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

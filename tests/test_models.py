@@ -13,7 +13,8 @@ from eispipe.models import (
     get_model,
 )
 from eispipe.spectrum import Spectrum
-from conftest import synth_coating, synth_degraded
+from conftest import synth_degraded
+from helpers import synth_coating
 
 
 def test_registry_and_get_model():
@@ -70,6 +71,44 @@ def test_initial_guess_is_sane(model, arrays):
     assert d["R_po"] > 0
     assert d["Q_c"] > 0
     assert 0 < d["n_c"] <= 1
+
+
+def test_guess_degraded_separates_Rpo_and_Rct_when_orders_of_magnitude_apart():
+    # R_ct/R_po = 250 here, and the sweep goes low enough (1e-2 Hz) that the
+    # two arcs blend into one continuous rise with no valley in |Z''| between
+    # them -- only phase still shows a clear local maximum at the boundary.
+    # The old guess used the *whole* low-frequency span (~R_e+R_po+R_ct,
+    # dominated by R_ct) as its R_po guess -- ~1e6 vs a true R_po of 8000 --
+    # which started the optimiser so far off it converged to a spurious
+    # local minimum even at noise=0. See eispipe.models._estimate_Rpo_Rct.
+    true_Rpo, true_Rct = 8_000.0, 2e6
+    freq, Z = synth_degraded(
+        n=50, params=(40.0, 2e-7, 0.93, true_Rpo, 4e-6, 0.82, true_Rct),
+        f_hi=10 ** 4.5, f_lo=1e-2,
+    )
+    spec = Spectrum(freq, Z)
+    guess = DEGRADED_COATING.named_params(DEGRADED_COATING.initial_guess(spec))
+
+    # tight enough to catch conflation (the old bug was ~100x off), loose
+    # enough to allow for a heuristic feeding a nonlinear optimiser.
+    assert true_Rpo / 2 < guess["R_po"] < true_Rpo * 2
+    assert true_Rct / 2 < guess["R_ct"] < true_Rct * 2
+
+
+def test_guess_degraded_falls_back_and_warns_when_arcs_are_undifferentiated():
+    # R_po and R_ct close in magnitude -> the two arcs blend into one, with
+    # no local maximum in phase between them. Should fall back to an even
+    # split of the low-frequency span rather than raising or guessing wildly.
+    freq, Z = synth_degraded(
+        n=50, params=(40.0, 2e-7, 0.93, 5_000.0, 4e-6, 0.82, 6_000.0),
+        f_hi=10 ** 4.5, f_lo=1e-2,
+    )
+    spec = Spectrum(freq, Z)
+
+    with pytest.warns(UserWarning, match="no clear separation"):
+        guess = DEGRADED_COATING.named_params(DEGRADED_COATING.initial_guess(spec))
+
+    assert guess["R_po"] == pytest.approx(guess["R_ct"])
 
 
 def test_build_returns_unfitted_customcircuit():

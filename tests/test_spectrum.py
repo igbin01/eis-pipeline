@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from eispipe.spectrum import META_FIELDS, Spectrum, SpectrumSeries
-from conftest import synth_coating
+from helpers import synth_coating
 
 
 # --------------------------------------------------------------------------
