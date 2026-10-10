@@ -10,6 +10,7 @@ import pytest
 from eispipe.fit import FitResult, FitSeries, fit_series, fit_spectrum
 from eispipe.models import get_model
 from eispipe.spectrum import Spectrum, SpectrumSeries
+from eispipe.validate import kramers_kronig
 from conftest import synth_degraded
 
 
@@ -210,3 +211,104 @@ def test_fit_series_soft_failure_continues():
     assert "fail" in fits[1].message.lower()
     assert np.isnan(fits[1].rmse)
     assert list(fits.successful.times) == [0.0]
+
+
+# ---------------------------------------------------------------------------
+# x_scale regression: Policastro et al. 2023 Table 2 coatings at GOhm scale
+# ---------------------------------------------------------------------------
+
+POLICASTRO_AREA_CM2 = 14.6
+# t (h): (R_po ohm*cm^2, Y0 S*s^n*cm^-2, m) from Table 2, 0.01 M NaCl, 5 degC
+POLICASTRO_TABLE2 = {
+    0: (22.6e9, 0.08e-9, 0.946),
+    840: (3.07e9, 0.19e-9, 0.898),
+    3192: (1.31e9, 0.29e-9, 0.872),
+}
+POLICASTRO_R_E = 4.0  # Table 1, R_Omega
+
+
+def _policastro_spectrum(t_h, noise=0.0, seed=0):
+    """intact_coating spectrum in raw ohms on the paper's grid (1e5..0.1 Hz, 10/decade)."""
+    from impedance.models.circuits import CustomCircuit
+
+    R_po, Y0, m = POLICASTRO_TABLE2[t_h]
+    true = {
+        "R_e": POLICASTRO_R_E,
+        "R_po": R_po / POLICASTRO_AREA_CM2,
+        "Q_c": Y0 * POLICASTRO_AREA_CM2,
+        "n_c": m,
+    }
+    freq = np.logspace(5, -1, 61)
+    cc = CustomCircuit(
+        "R0-p(R1,CPE1)",
+        initial_guess=[true["R_e"], true["R_po"], true["Q_c"], true["n_c"]],
+    )
+    Z = cc.predict(freq, use_initial=True)
+    if noise:
+        rng = np.random.default_rng(seed)
+        Z = Z * (1 + noise * (rng.normal(size=Z.size) + 1j * rng.normal(size=Z.size)))
+    spec = Spectrum(freq, Z, immersion_time_h=t_h, area_cm2=POLICASTRO_AREA_CM2)
+    return spec, true
+
+
+@pytest.mark.filterwarnings("ignore:Simulating circuit")
+@pytest.mark.parametrize("t_h", sorted(POLICASTRO_TABLE2))
+def test_fit_recovers_GOhm_coating_noise_free(t_h):
+    spec, true = _policastro_spectrum(t_h)
+    res = fit_spectrum(spec, "intact_coating")  # model's own data-driven guess
+    assert res.success
+    for name in ("R_po", "Q_c", "n_c"):
+        assert res.params[name] == pytest.approx(true[name], rel=1e-4), name
+
+
+@pytest.mark.filterwarnings("ignore:Simulating circuit")
+@pytest.mark.parametrize("t_h", sorted(POLICASTRO_TABLE2))
+def test_fit_recovers_GOhm_coating_with_noise(t_h):
+    spec, true = _policastro_spectrum(t_h, noise=0.01, seed=42)
+    res = fit_spectrum(spec, "intact_coating")
+    assert res.success
+    for name in ("Q_c", "n_c"):
+        assert res.params[name] == pytest.approx(true[name], rel=0.05), name
+
+
+@pytest.mark.filterwarnings("ignore:Simulating circuit")
+def test_x_scale_is_overridable_and_default_matters():
+    spec, true = _policastro_spectrum(0)
+    unscaled = fit_spectrum(spec, "intact_coating", x_scale=1.0)
+    # scipy's unscaled default stalls at GOhm scale -- the reason for "jac"
+    assert unscaled.params["Q_c"] != pytest.approx(true["Q_c"], rel=0.01)
+    assert inspect.signature(fit_spectrum).parameters["x_scale"].default == "jac"
+    assert inspect.signature(fit_series).parameters["x_scale"].default == "jac"
+
+
+def test_fit_series_passes_x_scale_through(monkeypatch):
+    import eispipe.fit as fit_mod
+
+    seen = []
+    real = fit_mod.fit_spectrum
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("x_scale"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fit_mod, "fit_spectrum", spy)
+    freq, Z = synth_degraded(noise=0.0)
+    series = SpectrumSeries([Spectrum(freq, Z, immersion_time_h=0.0)])
+    fit_series(series, "intact_coating", validate=False, x_scale=1.0)
+    fit_series(series, "intact_coating", validate=False)
+    assert seen == [1.0, "jac"]
+
+
+@pytest.mark.filterwarnings("ignore:Simulating circuit")
+@pytest.mark.parametrize("noise", [0.0, 0.01])
+@pytest.mark.parametrize("t_h", sorted(POLICASTRO_TABLE2))
+def test_kramers_kronig_passes_on_GOhm_coating(t_h, noise):
+    spec, _ = _policastro_spectrum(t_h, noise=noise, seed=42)
+    kk = kramers_kronig(spec)
+    print(
+        f"\nKK t={t_h} h noise={noise:.0%}: passed={kk.passed} M={kk.M} "
+        f"mu={kk.mu:.3f} rms_resid={kk.rms_resid:.3e} max_resid={kk.max_resid:.3e} "
+        f"threshold={kk.threshold:.3e}"
+    )
+    assert kk.passed is True
+    assert np.isfinite(kk.rms_resid) and kk.rms_resid <= kk.threshold
