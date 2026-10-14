@@ -590,6 +590,14 @@
       updateManifestInfo(manifestPicker.files);
     });
 
+    window.addEventListener("dragover", (e) => {
+      e.preventDefault();
+    });
+
+    window.addEventListener("drop", (e) => {
+      e.preventDefault();
+    });
+
     [dropZone, manifestDropZone].forEach((zone) => {
       zone.addEventListener("dragover", (e) => {
         e.preventDefault();
