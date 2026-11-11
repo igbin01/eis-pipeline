@@ -312,3 +312,61 @@ def test_kramers_kronig_passes_on_GOhm_coating(t_h, noise):
     )
     assert kk.passed is True
     assert np.isfinite(kk.rms_resid) and kk.rms_resid <= kk.threshold
+
+
+# ---------------------------------------------------------------------------
+# C9: any per-spectrum exception becomes a failed row; the series continues
+# ---------------------------------------------------------------------------
+
+
+def _model_whose_guess_raises_at(t_bad):
+    from eispipe.models import INTACT_COATING, CircuitModel
+
+    def guess(spec):
+        if spec.immersion_time_h == t_bad:
+            raise ZeroDivisionError("heuristic divided by zero")
+        return INTACT_COATING.initial_guess(spec)
+
+    return CircuitModel(
+        name="guess_raises",
+        circuit=INTACT_COATING.circuit,
+        param_names=INTACT_COATING.param_names,
+        units=INTACT_COATING.units,
+        description="intact_coating whose initial guess raises at one time",
+        _guess=guess,
+    )
+
+
+def test_fit_series_continues_when_initial_guess_raises(caplog):
+    import logging
+
+    from helpers import synth_coating
+
+    freq, Z = synth_coating()
+    series = SpectrumSeries(
+        [Spectrum(freq, Z, sample_id="P1", immersion_time_h=t) for t in (0.0, 24.0, 48.0)]
+    )
+    progress = []
+
+    with caplog.at_level(logging.WARNING, logger="eispipe.fit"):
+        fits = fit_series(
+            series,
+            _model_whose_guess_raises_at(24.0),
+            validate=False,
+            on_progress=lambda i, n, r: progress.append(i),
+        )
+
+    assert len(fits) == 3
+    assert progress == [0, 1, 2]
+    assert [r.success for r in fits] == [True, False, True]
+    assert fits[1].message.startswith("ZeroDivisionError: ")
+    assert "heuristic divided by zero" in fits[1].message
+    assert np.isnan(fits[1].rmse)
+    assert "ZeroDivisionError" in caplog.text
+
+
+def test_fit_series_still_raises_on_bad_weighting():
+    freq, Z = synth_degraded(noise=0.0)
+    series = SpectrumSeries([Spectrum(freq, Z, immersion_time_h=0.0)])
+    with pytest.raises(ValueError, match="weighting"):
+        fit_series(series, "degraded_coating", weighting="l2", validate=False)

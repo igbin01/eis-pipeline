@@ -19,6 +19,7 @@ Two deliberate defaults:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
@@ -30,6 +31,8 @@ from .spectrum import Spectrum, SpectrumSeries
 from .validate import kramers_kronig
 
 __all__ = ["FitResult", "FitSeries", "fit_spectrum", "fit_series"]
+
+_log = logging.getLogger(__name__)
 
 
 def _chi2_norm(Z_data: np.ndarray, Z_fit: np.ndarray) -> float:
@@ -64,8 +67,8 @@ class FitResult:
     weighting:
         ``"modulus"`` (fit residuals divided by ``|Z|``) or ``"none"``.
     success, message:
-        ``success`` is False if the optimiser raised; ``message`` holds the
-        error text.
+        ``success`` is False if fitting this spectrum raised (in
+        :func:`fit_series`); ``message`` is then ``"<ExceptionType>: <text>"``.
     kk_passed:
         Lin-KK verdict, filled in by :func:`fit_series` when ``validate=True``;
         ``None`` if KK was not run.
@@ -219,8 +222,10 @@ def fit_spectrum(
     Raises
     ------
     RuntimeError
-        If the optimiser fails. :func:`fit_series` catches this per-spectrum;
-        call it directly if you want a soft failure.
+        If the optimiser fails. Other exceptions (e.g. from the model's
+        initial-guess heuristic) propagate unchanged. :func:`fit_series`
+        catches any of them per spectrum and records a failed ``FitResult``;
+        call :func:`fit_spectrum` directly if you want an exception.
     """
     from impedance.models.circuits import CustomCircuit
     from impedance.models.circuits.fitting import rmse as _rmse
@@ -302,10 +307,15 @@ def fit_series(
         does not change the return value or stop the series when a single fit
         fails.
 
-    A spectrum whose optimiser fails yields a ``FitResult`` with
-    ``success=False`` and the error message; the series continues.
+    If fitting a spectrum raises anything -- optimiser failure, the model's
+    initial-guess heuristic, prediction -- the exception is logged, that
+    spectrum gets a ``FitResult`` with ``success=False`` and
+    ``message="<ExceptionType>: <text>"``, and the series continues.
+    Invalid arguments (unknown model, bad ``weighting``) still raise.
     """
     cm = get_model(model)
+    if weighting not in ("modulus", "none"):
+        raise ValueError("weighting must be 'modulus' or 'none'")
     kk_kwargs = kk_kwargs or {}
     results: list[FitResult] = []
     prev_params: list[float] | None = None
@@ -318,7 +328,12 @@ def fit_series(
                 spec, cm, initial_guess=guess, weighting=weighting, bounds=bounds,
                 x_scale=x_scale,
             )
-        except RuntimeError as exc:
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            _log.warning(
+                "%s fit failed at immersion_time_h=%s: %s",
+                cm.name, spec.immersion_time_h, message,
+            )
             res = FitResult(
                 model_name=cm.name,
                 circuit=cm.circuit,
@@ -331,7 +346,7 @@ def fit_series(
                 chi2_norm=float("nan"),
                 weighting=weighting,
                 success=False,
-                message=str(exc),
+                message=message,
                 sample_id=spec.sample_id,
                 immersion_time_h=spec.immersion_time_h,
                 area_cm2=spec.area_cm2,
