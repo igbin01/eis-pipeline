@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import io as _io
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -66,6 +67,10 @@ class KKResult:
         should not fail an otherwise clean spectrum).
     sample_id, immersion_time_h:
         Carried from the spectrum for series bookkeeping.
+    error:
+        ``None`` normally. If the Lin-KK computation itself raised, this holds
+        ``"<ExceptionType>: <message>"`` and ``passed`` is False -- a failure
+        of the test, not evidence about the data.
     """
 
     freq: np.ndarray
@@ -80,6 +85,7 @@ class KKResult:
     passed: bool
     sample_id: str | None = None
     immersion_time_h: float | None = None
+    error: str | None = None
 
     def __repr__(self) -> str:
         verdict = "PASS" if self.passed else "FAIL"
@@ -87,6 +93,23 @@ class KKResult:
             f"KKResult({verdict}, immersion_time_h={self.immersion_time_h!r}, "
             f"M={self.M}, rms_resid={self.rms_resid:.2%})"
         )
+
+
+def _numpy_version() -> str:
+    return np.__version__
+
+
+def _legacy_print_options():
+    """``np.printoptions(legacy="1.25")`` on NumPy >= 2, else a no-op.
+
+    impedance 1.7.1's eval_linKK builds a circuit string from repr() of NumPy
+    scalars; NumPy 2 changed that repr to "np.float64(...)", which then fails
+    to eval. The "1.25" legacy mode restores the bare-number repr, but it only
+    exists from NumPy 2.0 -- and NumPy 1.x already prints bare numbers.
+    """
+    if int(_numpy_version().split(".")[0]) >= 2:
+        return np.printoptions(legacy="1.25")
+    return contextlib.nullcontext()
 
 
 def kramers_kronig(
@@ -123,7 +146,10 @@ def kramers_kronig(
     A **fail** on data you trust usually means non-stationarity (the coating
     changed during the sweep) or drift -- which is real information, not a
     reason to discard the point. Downstream (:func:`~eispipe.fit.fit_series`)
-    flags failures and fits them anyway.
+    flags failures and fits them anyway. If the computation itself raised,
+    the result is also a fail but carries :attr:`KKResult.error` and a
+    ``RuntimeWarning`` is emitted -- check ``error`` before reading a fail as
+    physical.
     """
     from impedance.validation import linKK
 
@@ -132,7 +158,7 @@ def kramers_kronig(
     # or a library-specific ZeroDivisionError. Clean spectra should still return
     # a proper pass/fail boolean, and broken spectra should produce a failed
     # KKResult instead of aborting the series.
-    def _failed_result() -> KKResult:
+    def _failed_result(error: str | None = None) -> KKResult:
         return KKResult(
             freq=np.asarray(spec.freq, dtype=float),
             Z_fit=np.asarray(spec.Z, dtype=complex),
@@ -146,6 +172,7 @@ def kramers_kronig(
             passed=False,
             sample_id=spec.sample_id,
             immersion_time_h=spec.immersion_time_h,
+            error=error,
         )
 
     if spec.freq.size == 0:
@@ -156,17 +183,23 @@ def kramers_kronig(
 
     # Two library-interaction workarounds, both scoped to this call:
     #  - linKK prints progress to stdout every 10 RC elements -> silence it.
-    #  - impedance 1.7.1's eval_linKK builds a circuit string with repr() of
-    #    NumPy scalars; under NumPy >= 2 that repr is "np.float64(...)", which
-    #    then fails to eval. legacy='1.25' printing restores the bare-number
-    #    repr it expects.
+    #  - NumPy >= 2 scalar repr breaks impedance's eval_linKK; see
+    #    _legacy_print_options.
     try:
-        with contextlib.redirect_stdout(_io.StringIO()), np.printoptions(legacy="1.25"):
+        with contextlib.redirect_stdout(_io.StringIO()), _legacy_print_options():
             M, mu, Z_fit, resid_real, resid_imag = linKK(
                 spec.freq, spec.Z, c=c, max_M=max_M, fit_type=fit_type, add_cap=add_cap
             )
-    except Exception:
-        return _failed_result()
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        warnings.warn(
+            f"Lin-KK test raised {error}; reporting this spectrum as a KK fail "
+            f"(see KKResult.error) -- this is a computation error, not a "
+            f"property of the data",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return _failed_result(error)
 
     pooled = np.concatenate([np.abs(resid_real), np.abs(resid_imag)])
     if pooled.size == 0:
