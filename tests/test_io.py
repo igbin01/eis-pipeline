@@ -318,3 +318,40 @@ def test_load_instrument_unknown_extension_raises(tmp_path):
     p.write_text("nonsense")
     with pytest.raises(ValueError, match="cannot infer instrument"):
         load_instrument(p)
+
+
+# ---------------------------------------------------------------------------
+# C6: only a header that STARTS with a negation marker is treated as -Im(Z)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "header, negated",
+    [
+        ("-Im(Z)/ohm", True),
+        ("-Z''", True),
+        ("neg_imag", True),
+        ("Z-Imag", False),
+        ("Z-Im (ohm)", False),
+        ("Imag", False),
+        ("Z''", False),
+        ("Zimag", False),
+    ],
+)
+def test_header_is_negated_imag_is_anchored(header, negated):
+    from eispipe.io import _header_is_negated_imag
+
+    assert _header_is_negated_imag(header) is negated
+
+
+@pytest.mark.parametrize("imag_header", ["Z-Imag", "Z-Im (ohm)"])
+def test_load_csv_hyphenated_imag_header_is_not_sign_flipped(tmp_path, imag_header):
+    freq, Z = synth_coating()
+    p = tmp_path / "s.csv"
+    write_csv(p, freq, Z, cols=("freq", "Zreal", imag_header))  # stored as-is (negative)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "looks inductive" warning either
+        s = load_csv(p)
+
+    np.testing.assert_allclose(s.Z, Z, rtol=1e-9)

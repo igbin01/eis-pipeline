@@ -71,9 +71,13 @@ def _norm_header(name: str) -> str:
 
 
 def _header_is_negated_imag(name: str) -> bool:
-    """True if the raw header marks a negated imaginary column, e.g. ``-Im(Z)``."""
+    """True if the header *starts* with a negation marker: ``-``, ``neg`` or ``minus``.
+
+    E.g. ``-Im(Z)/ohm``, ``-Z''``, ``neg_imag``. A hyphen used as a separator
+    (``Z-Imag``, ``Z-Im (ohm)``) is not a negation marker.
+    """
     s = str(name).strip().lower().replace(" ", "")
-    return s.startswith("-") or s.startswith("neg") or "-im" in s or "minusim" in s
+    return s.startswith(("-", "neg", "minus"))
 
 
 def _classify(name: str) -> str | None:
@@ -176,8 +180,9 @@ def load_csv(
     ``imag_sign`` controls conversion to the internal
     capacitive-is-negative convention:
 
-    * ``"auto"`` (default) -- negate iff the imaginary column header is marked
-      negative (``-Im(Z)``, ``neg...``); otherwise take values as written.
+    * ``"auto"`` (default) -- negate iff the imaginary column header starts
+      with ``-``, ``neg`` or ``minus`` (``-Im(Z)``, ``-Z''``, ``neg_imag``; but
+      not ``Z-Imag``); otherwise take values as written.
       Detection uses the header only, never the data; pass an explicit value if
       the header is unclear.
     * ``"as_measured"`` -- use values exactly as in the file.
