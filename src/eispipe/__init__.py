@@ -13,7 +13,9 @@ Public API (stable):
     fit_spectrum, fit_series, FitResult, FitSeries  -- fitting (see ``fit``)
     coating_capacitance, double_layer_capacitance,
     cpe_to_capacitance, breakpoint_frequency,
-    water_uptake, water_uptake_series, metrics_table  -- metrics (see ``metrics``)
+    breakpoint_frequency_measured,
+    water_uptake, water_uptake_series, metrics_table,
+    ml_feature_table                                  -- metrics (see ``metrics``)
 
 The ``plots`` module is imported explicitly (``from eispipe import plots``) so
 that importing the package does not pull in matplotlib.
@@ -37,9 +39,11 @@ from .metrics import (
     coating_capacitance,
     double_layer_capacitance,
     breakpoint_frequency,
+    breakpoint_frequency_measured,
     water_uptake,
     water_uptake_series,
     metrics_table,
+    ml_feature_table,
 )
 
 __version__ = "0.1.0"
@@ -68,8 +72,10 @@ __all__ = [
     "coating_capacitance",
     "double_layer_capacitance",
     "breakpoint_frequency",
+    "breakpoint_frequency_measured",
     "water_uptake",
     "water_uptake_series",
     "metrics_table",
+    "ml_feature_table",
     "__version__",
 ]

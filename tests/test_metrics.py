@@ -376,3 +376,12 @@ def test_numeric_reference_uses_nearest_fit_with_valid_capacitance():
         df = metrics_table(fits, reference=0.0)
 
     assert list(df["reference_time_h"]) == [24.0, 24.0, 24.0]
+
+
+def test_breakpoint_measured_and_ml_feature_table_are_public():
+    import eispipe
+    from eispipe import metrics
+
+    assert eispipe.breakpoint_frequency_measured is metrics.breakpoint_frequency_measured
+    assert eispipe.ml_feature_table is metrics.ml_feature_table
+    assert {"breakpoint_frequency_measured", "ml_feature_table"} <= set(eispipe.__all__)
