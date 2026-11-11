@@ -1,0 +1,5 @@
+.venv
+.git
+**/__pycache__
+reports/policastro2023_fig5
+**/*.png
