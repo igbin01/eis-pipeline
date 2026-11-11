@@ -27,16 +27,20 @@ SCRIPTS = REPO_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, jsonify, request, send_file, stream_with_context
+from werkzeug.utils import secure_filename
 
 from eispipe.fit import fit_series
-from eispipe.io import load_csv, load_series
+from eispipe.io import load_csv, load_manifest, load_series
 from eispipe.metrics import metrics_table
 from eispipe.plots import bode, plot_metric
 from eispipe.spectrum import Spectrum, SpectrumSeries
 from eispipe.validate import validate_series
 
-app = Flask(__name__, static_folder=".", static_url_path="")
+APP_DIR = Path(__file__).resolve().parent
+
+# No static folder: only the page itself is served, never the app/ directory.
+app = Flask(__name__, static_folder=None)
 
 jobs: dict[str, dict[str, Any]] = {}
 
@@ -67,7 +71,7 @@ def _json_safe(value: Any) -> Any:
 
 @app.get("/")
 def index():
-    return app.send_static_file("index.html")
+    return send_file(APP_DIR / "index.html")
 
 
 def _emit_event(stage: str, status: str, **extra: Any) -> str:
@@ -88,6 +92,30 @@ def _cleanup_job(job_id: str) -> None:
             except Exception:
                 pass
         jobs.pop(job_id, None)
+
+
+class _UploadRejected(ValueError):
+    """Upload refused for a reason whose message is safe to show the client."""
+
+
+def _save_upload(uploaded, tmpdir: Path, stem: str) -> Path:
+    """Save under a server-chosen name in *tmpdir*; only the extension is kept."""
+    safe = secure_filename(uploaded.filename or "")
+    if not safe:
+        raise _UploadRejected("invalid filename")
+    dest = tmpdir / f"{stem}{Path(safe).suffix.lower()}"
+    uploaded.save(dest)
+    return dest
+
+
+def _resolve_manifest_row(name: str, stored: dict[str, Path], tmpdir: Path) -> str:
+    """Map a manifest ``filename`` to its stored upload; reject anything else."""
+    if name != Path(name).name or "\\" in name or name not in stored:
+        raise _UploadRejected("manifest references a file that was not uploaded")
+    target = stored[name].resolve()
+    if target.parent != tmpdir.resolve():
+        raise _UploadRejected("manifest references a file that was not uploaded")
+    return target.name
 
 
 @app.post("/api/upload")
@@ -117,21 +145,22 @@ def upload():
         manifest_file = request.files.get("manifest") or request.files.get("manifest_csv")
 
         if manifest_file:
-            manifest_path = tmpdir / manifest_file.filename
-            manifest_file.save(manifest_path)
-            for uploaded in files:
+            manifest_path = _save_upload(manifest_file, tmpdir, "manifest")
+            stored: dict[str, Path] = {}
+            for i, uploaded in enumerate(files):
                 if uploaded.filename:
-                    dest = tmpdir / uploaded.filename
-                    uploaded.save(dest)
-            series = load_series(manifest_path, data_dir=tmpdir)
+                    stored[uploaded.filename] = _save_upload(uploaded, tmpdir, f"data_{i}")
+            manifest = load_manifest(manifest_path)
+            manifest["filename"] = [
+                _resolve_manifest_row(str(name), stored, tmpdir) for name in manifest["filename"]
+            ]
+            series = load_series(manifest, data_dir=tmpdir)
             job["series"] = series
             jobs[job_id] = job
             return jsonify({"job_id": job_id})
 
         if len(files) == 1:
-            uploaded = files[0]
-            csv_path = tmpdir / uploaded.filename
-            uploaded.save(csv_path)
+            csv_path = _save_upload(files[0], tmpdir, "data_0")
             meta = {}
             sample_id = request.form.get("sample_id")
             immersion_time_h = request.form.get("immersion_time_h")
@@ -148,9 +177,13 @@ def upload():
             return jsonify({"job_id": job_id})
 
         return jsonify({"error": "upload requires either one CSV or a manifest CSV + files, or the demo flag"}), 400
-    except Exception as exc:
+    except _UploadRejected as exc:
         _cleanup_job(job_id)
         return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("upload %s failed", job_id)
+        _cleanup_job(job_id)
+        return jsonify({"error": "could not load the uploaded files"}), 400
 
 
 @app.get("/api/run/<job_id>")
@@ -177,8 +210,9 @@ def run_job(job_id: str):
             kk_df = validate_series(series_obj)
             kk_records = kk_df.to_dict(orient="records")
             yield _emit_event("validate", "done", message="KK validation complete", kk_pass_fail=kk_records)
-        except Exception as exc:
-            yield _emit_event("validate", "failed", message=str(exc))
+        except Exception:
+            app.logger.exception("job %s: validation failed", job_id)
+            yield _emit_event("validate", "failed", message="KK validation failed")
 
         # fit
         yield _emit_event("fit", "in_progress", message="fitting spectra")
@@ -210,8 +244,9 @@ def run_job(job_id: str):
 
         try:
             fits = fit_series(series_obj, model, validate=True, on_progress=on_progress)
-        except Exception as exc:
-            yield _emit_event("fit", "failed", message=str(exc))
+        except Exception:
+            app.logger.exception("job %s: fitting failed", job_id)
+            yield _emit_event("fit", "failed", message="fitting failed")
             return
 
         for event in fit_events:
@@ -231,8 +266,9 @@ def run_job(job_id: str):
         try:
             metrics = metrics_table(fits)
             metrics_records = metrics.to_dict(orient="records")
-        except Exception as exc:
-            yield _emit_event("metrics", "failed", message=str(exc))
+        except Exception:
+            app.logger.exception("job %s: metrics failed", job_id)
+            yield _emit_event("metrics", "failed", message="metrics computation failed")
             return
         yield _emit_event("metrics", "done", message="metrics computed", metrics_table=metrics_records)
 
@@ -258,8 +294,9 @@ def run_job(job_id: str):
 
             bode_png = base64.b64encode(bode_buf.getvalue()).decode("ascii")
             rpo_png = base64.b64encode(rpo_buf.getvalue()).decode("ascii")
-        except Exception as exc:
-            yield _emit_event("plot", "failed", message=str(exc))
+        except Exception:
+            app.logger.exception("job %s: plotting failed", job_id)
+            yield _emit_event("plot", "failed", message="plotting failed")
             return
 
         yield _emit_event(
