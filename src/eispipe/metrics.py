@@ -210,8 +210,9 @@ def water_uptake(
     capacitance -- conventionally the dry-film capacitance before immersion,
     against which later capacitances ``C_t`` are compared. Brasher-Kingsbury
     assumes a dry reference; when no dry measurement exists and ``C_0`` is
-    taken from the earliest *immersed* spectrum instead (as
-    :func:`water_uptake_series` and :func:`metrics_table` do), the result
+    taken from the earliest *immersed* spectrum with a valid coating
+    capacitance instead (as :func:`water_uptake_series` and
+    :func:`metrics_table` do), the result
     underestimates uptake by whatever water was absorbed before that first
     immersed measurement. Either argument may be a capacitance in farads or a
     :class:`~eispipe.fit.FitResult` (coating capacitance is then computed via
@@ -233,24 +234,42 @@ def water_uptake(
     return float(np.log10(ct / c0) / np.log10(epsilon_water))
 
 
+def _valid_coating_capacitance(fit: FitResult) -> float | None:
+    """``C_c`` of a successful fit, or ``None`` if it cannot be derived.
+
+    Not derivable means :func:`coating_capacitance` raises (e.g. ``Q_c`` or
+    ``n_c`` at the 0 bound) or returns a non-finite / non-positive value.
+    """
+    if not fit.success:
+        return None
+    try:
+        c = coating_capacitance(fit)
+    except ValueError:
+        return None
+    return c if np.isfinite(c) and c > 0 else None
+
+
 def _reference_capacitance(fits: FitSeries, reference) -> tuple[float, float | None]:
-    """Return ``(C_0, reference_time_h)`` for the resolved reference fit."""
+    """Return ``(C_0, reference_time_h)`` for the resolved reference fit.
+
+    Only fits with a valid coating capacitance are candidates: ``"first"``
+    picks the earliest of them, a number picks the one nearest that time.
+    """
+    candidates = [(r, c) for r in fits if (c := _valid_coating_capacitance(r)) is not None]
     if isinstance(reference, (int, float)) and not isinstance(reference, bool):
-        # nearest immersion time, among successful fits only
-        ok = fits.successful
-        if len(ok) == 0:
+        if not candidates:
             raise ValueError(
-                f"no successful fit available to use as reference for t={reference} h"
+                f"no fit with a valid coating capacitance to use as reference "
+                f"for t={reference} h"
             )
-        times = ok.times
-        idx = int(np.argmin(np.abs(times - float(reference))))
-        ref_fit = ok[idx]
-        return coating_capacitance(ref_fit), ref_fit.immersion_time_h
+        times = np.array([r.immersion_time_h for r, _ in candidates], dtype=float)
+        ref_fit, c0 = candidates[int(np.argmin(np.abs(times - float(reference))))]
+        return c0, ref_fit.immersion_time_h
     if reference == "first":
-        for r in fits:
-            if r.success:
-                return coating_capacitance(r), r.immersion_time_h
-        raise ValueError("no successful fit to use as reference")
+        if not candidates:
+            raise ValueError("no fit with a valid coating capacitance to use as reference")
+        ref_fit, c0 = candidates[0]
+        return c0, ref_fit.immersion_time_h
     raise ValueError("reference must be 'first' or an immersion time in hours")
 
 
@@ -262,15 +281,25 @@ def water_uptake_series(
 ) -> pd.DataFrame:
     """Water uptake at every immersion time relative to a reference spectrum.
 
-    ``reference`` is ``"first"`` (earliest successful fit) or an immersion time
-    in hours (nearest fit is used). Columns: ``immersion_time_h``, ``C_c``,
-    ``water_uptake_vol_frac``.
+    The reference is the earliest immersion spectrum with a valid coating
+    capacitance: ``reference="first"`` (default) uses the earliest successful
+    fit whose ``C_c`` can be derived; a number (hours) uses the such fit
+    nearest that time. Columns: ``immersion_time_h``, ``C_c``,
+    ``water_uptake_vol_frac``. A successful fit whose ``C_c`` cannot be
+    derived gets NaN in both columns and a ``UserWarning``.
     """
     c0, _ = _reference_capacitance(fits, reference)
     rows = []
     for r in fits:
         if r.success:
-            cc = coating_capacitance(r)
+            try:
+                cc = coating_capacitance(r)
+            except ValueError as exc:
+                warnings.warn(
+                    f"could not derive C_c at t={r.immersion_time_h} h: {exc}",
+                    stacklevel=2,
+                )
+                cc = np.nan
             xv = float(np.log10(cc / c0) / np.log10(epsilon_water))
         else:
             cc, xv = np.nan, np.nan
@@ -366,9 +395,11 @@ def metrics_table(
     fit-independent -45 deg phase-crossing frequency (see
     :func:`breakpoint_frequency_measured`); ``f_break`` is the -Z'' apex of
     the fitted ``R_po || CPE`` loop (see :func:`breakpoint_frequency`), so
-    the two differ systematically when ``n_c < 1``. ``reference_time_h``
-    records which immersion time's capacitance was used as the water-uptake
-    reference ``C_0`` (NaN if no reference was resolvable). When the fit
+    the two differ systematically when ``n_c < 1``. The water-uptake
+    reference ``C_0`` is the earliest immersion spectrum with a valid coating
+    capacitance (``reference="first"``), or the such fit nearest a given
+    time in hours; ``reference_time_h`` records the time actually used (NaN
+    if no fit has a valid coating capacitance). When the fit
     exposes a substrate loop: ``R_ct, C_dl``. When ``area_cm2`` is set:
     ``R_po_ohm_cm2, C_c_F_per_cm2``.
 

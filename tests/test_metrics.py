@@ -327,3 +327,52 @@ def test_metrics_table_zero_Q_dl_only_blanks_C_dl():
     assert np.isnan(row["C_dl"])
     assert row["R_ct"] == 2e6
     assert np.isfinite(row["C_c"]) and np.isfinite(row["f_break"])
+
+
+# ---------------------------------------------------------------------------
+# reference = earliest fit with a valid coating capacitance
+# ---------------------------------------------------------------------------
+
+
+def _series_with_degenerate_first_fit():
+    return FitSeries(
+        [
+            _manual_fit({**GOOD_INTACT, "Q_c": 0.0}, 0.0),  # C_c not derivable
+            _manual_fit(GOOD_INTACT, 24.0),
+            _manual_fit({**GOOD_INTACT, "Q_c": 4e-7}, 48.0),  # capacitance rose
+        ]
+    )
+
+
+def test_metrics_table_reference_skips_degenerate_first_fit():
+    fits = _series_with_degenerate_first_fit()
+
+    with pytest.warns(UserWarning, match="could not derive"):
+        df = metrics_table(fits)
+
+    assert list(df["reference_time_h"]) == [24.0, 24.0, 24.0]
+    wu = df.set_index("immersion_time_h")["water_uptake_vol_frac"]
+    assert np.isnan(wu[0.0])
+    assert wu[24.0] == pytest.approx(0.0)
+    assert np.isfinite(wu[48.0]) and wu[48.0] > 0
+
+
+def test_water_uptake_series_reference_skips_degenerate_first_fit():
+    fits = _series_with_degenerate_first_fit()
+
+    with pytest.warns(UserWarning, match="could not derive"):
+        df = water_uptake_series(fits)
+
+    wu = df.set_index("immersion_time_h")["water_uptake_vol_frac"]
+    assert np.isnan(wu[0.0])
+    assert wu[24.0] == pytest.approx(0.0)
+    assert np.isfinite(wu[48.0]) and wu[48.0] > 0
+
+
+def test_numeric_reference_uses_nearest_fit_with_valid_capacitance():
+    fits = _series_with_degenerate_first_fit()
+
+    with pytest.warns(UserWarning, match="could not derive"):
+        df = metrics_table(fits, reference=0.0)
+
+    assert list(df["reference_time_h"]) == [24.0, 24.0, 24.0]
