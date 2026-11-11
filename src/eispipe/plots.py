@@ -104,7 +104,10 @@ def nyquist_series(series: SpectrumSeries, *, ax=None, cmap="viridis", colorbar=
 def kk_residuals(kk: KKResult, *, axes=None):
     """Plot Lin-KK relative residuals (real and imaginary) vs. frequency.
 
-    A horizontal band at +/- ``kk.threshold`` marks the pass criterion.
+    A shaded band at +/- ``kk.threshold`` is a visual reference only: the
+    test passes when the RMS of the pooled real and imaginary residuals is
+    <= ``kk.threshold``, so individual points outside the band do not by
+    themselves mean a fail.
     """
     import matplotlib.pyplot as plt
 

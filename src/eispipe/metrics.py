@@ -108,7 +108,8 @@ def coating_capacitance(fit: FitResult, *, per_area: bool = False) -> float:
 
     Uses :func:`cpe_to_capacitance` with ``R = R_po`` (the resistance in
     parallel with the coating CPE at high frequency, in both models). Returns
-    farads, or F/cm^2 if ``per_area`` and ``fit.area_cm2`` is set.
+    farads, or F/cm^2 if ``per_area``; ``per_area`` raises ``ValueError`` when
+    ``fit.area_cm2`` is not set.
 
     In the ``degraded_coating`` model, ``R_po`` is taken as the effective
     parallel resistance of the coating loop even though the substrate
@@ -132,7 +133,8 @@ def double_layer_capacitance(fit: FitResult, *, per_area: bool = False) -> float
     """Substrate double-layer capacitance from ``Q_dl, n_dl, R_ct``.
 
     Returns ``None`` when the model has no substrate loop (e.g.
-    ``intact_coating``). Farads, or F/cm^2 if ``per_area``.
+    ``intact_coating``). Farads, or F/cm^2 if ``per_area``; ``per_area``
+    raises ``ValueError`` when ``fit.area_cm2`` is not set.
     """
     _require_fit(fit)
     p = fit.params
@@ -314,13 +316,19 @@ def water_uptake_series(
 
 
 def ml_feature_table(fits: FitSeries) -> pd.DataFrame:
-    """Return one row per immersion time as a flat sklearn-friendly feature table.
+    """Flat, sklearn-friendly feature table: one row per *successful* fit.
 
-    Columns are the requested model inputs:
-    ``immersion_time_h, R_po, C_c, n_c, chi2_norm,
-    water_uptake_vol_frac`` followed by per-feature finite-difference rate
-    columns with names ``*_rate``. The first row is the only row that cannot
-    have a prior point to diff against, so its derivative columns are ``NaN``.
+    Failed fits are dropped, so rows need not cover every immersion time.
+    Columns: ``immersion_time_h, R_po, C_c, n_c, chi2_norm,
+    water_uptake_vol_frac``, then a finite-difference rate column ``<name>_rate``
+    for each feature except time, computed against the previous row. Rate
+    columns are ``NaN`` in the first row and in any row whose time equals the
+    previous row's (``dt == 0``).
+
+    ``water_uptake_vol_frac`` uses the first successful fit's ``C_c`` as the
+    reference (NaN if that cannot be derived). A successful fit whose own
+    ``C_c`` cannot be derived raises ``ValueError``. Returns an empty frame if
+    no fit succeeded.
     """
     rows = []
     for result in fits:

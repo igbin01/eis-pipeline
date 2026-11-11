@@ -246,8 +246,12 @@ def load_instrument(
 
     ``instrument`` is one of ``gamry, autolab, biologic, parstat, zplot,
     versastudio, powersuite, chinstruments``. If omitted it is guessed from the
-    file extension (``.dta`` -> gamry, ``.mpt`` -> biologic, ``.z`` -> zplot,
-    ``.par`` -> versastudio); pass it explicitly for anything else.
+    file extension (``.dta`` -> gamry, ``.mpt`` and ``.mpr`` -> biologic,
+    ``.z`` -> zplot, ``.par`` -> versastudio). A ``.csv`` or ``.txt`` file with
+    no ``instrument`` is passed to ``readFile(instrument=None)``, i.e.
+    ``impedance.py``'s plain CSV reader (headerless ``freq, Z', Z''``
+    columns). Any other extension without ``instrument`` raises
+    ``ValueError``.
 
     ``impedance.py``'s readers are trusted to return impedance in the internal
     capacitive-is-negative convention. Set ``negate_imaginary=True`` if a

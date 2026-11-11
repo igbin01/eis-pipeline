@@ -58,8 +58,9 @@ class KKResult:
     M:
         Number of RC elements the test used.
     mu:
-        Schonleber over/under-fitting measure (the test adds elements until
-        ``mu < c``).
+        Schonleber over/under-fitting measure. With a cutoff ``c`` set, the
+        test adds elements until ``mu < c``; with the default ``c=None`` it
+        fits exactly ``max_M`` elements and ``mu`` is only reported.
     max_resid, rms_resid:
         Max and RMS of ``|resid|`` pooled over real and imaginary parts.
     threshold, passed:
