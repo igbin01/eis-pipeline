@@ -403,3 +403,14 @@ def test_load_series_by_pattern_absolute_glob_string(tmp_path):
     series = load_series_by_pattern(str(tmp_path / "panel_*h.csv"))
 
     np.testing.assert_allclose(series.times, [0.0, 24.0])
+
+
+def test_load_instrument_mpr_is_unsupported_and_points_to_mpt(tmp_path):
+    p = tmp_path / "run.mpr"  # BioLogic binary export
+    p.write_bytes(b"BIO-LOGIC MODULAR FILE\x1a\x00\x01\x02\xff\xfe")
+
+    with pytest.raises(ValueError, match=r"\.mpt") as excinfo:
+        load_instrument(p)
+
+    assert "cannot infer instrument" in str(excinfo.value)
+    assert "binary" in str(excinfo.value)

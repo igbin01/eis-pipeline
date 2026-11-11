@@ -229,7 +229,6 @@ def load_csv(
 _INSTRUMENT_BY_EXT = {
     ".dta": "gamry",
     ".mpt": "biologic",
-    ".mpr": "biologic",
     ".z": "zplot",
     ".par": "versastudio",
 }
@@ -246,12 +245,14 @@ def load_instrument(
 
     ``instrument`` is one of ``gamry, autolab, biologic, parstat, zplot,
     versastudio, powersuite, chinstruments``. If omitted it is guessed from the
-    file extension (``.dta`` -> gamry, ``.mpt`` and ``.mpr`` -> biologic,
-    ``.z`` -> zplot, ``.par`` -> versastudio). A ``.csv`` or ``.txt`` file with
-    no ``instrument`` is passed to ``readFile(instrument=None)``, i.e.
+    file extension (``.dta`` -> gamry, ``.mpt`` -> biologic, ``.z`` -> zplot,
+    ``.par`` -> versastudio). A ``.csv`` or ``.txt`` file with no
+    ``instrument`` is passed to ``readFile(instrument=None)``, i.e.
     ``impedance.py``'s plain CSV reader (headerless ``freq, Z', Z''``
     columns). Any other extension without ``instrument`` raises
-    ``ValueError``.
+    ``ValueError``. BioLogic's binary ``.mpr`` format is unsupported
+    (``impedance.py`` reads only the ``.mpt`` text export); export to
+    ``.mpt`` from EC-Lab first.
 
     ``impedance.py``'s readers are trusted to return impedance in the internal
     capacitive-is-negative convention. Set ``negate_imaginary=True`` if a
@@ -265,9 +266,14 @@ def load_instrument(
     if instrument is None:
         instrument = _INSTRUMENT_BY_EXT.get(path.suffix.lower())
     if instrument is None and path.suffix.lower() not in {".csv", ".txt"}:
+        hint = (
+            " (.mpr is BioLogic's binary format; export to .mpt (text) from EC-Lab first)"
+            if path.suffix.lower() == ".mpr"
+            else ""
+        )
         raise ValueError(
             f"cannot infer instrument from extension {path.suffix!r}; "
-            f"pass instrument= explicitly"
+            f"pass instrument= explicitly{hint}"
         )
 
     freq, Z = readFile(str(path), instrument=instrument)
