@@ -44,14 +44,16 @@ Look up a model with `eispipe.get_model(name)`.
 
 ## Install and test
 
-Requires Python ≥ 3.10.
+Requires Python 3.12+ and NumPy 2.0+ (tested on Python 3.12 and 3.14 with
+NumPy 2.5).
 
 ```
-pip install -e ".[dev]"
+pip install -e ".[web,dev]"
 pytest
 ```
 
-The `dev` extra installs pytest and Flask, which the web app needs.
+The `web` extra installs Flask, which the web app needs. The `dev` extra
+installs pytest and ruff.
 
 ## Web app
 
@@ -81,12 +83,24 @@ script uses the paper's already-fitted parameters. It does not test whether
 
 ## Known limitations
 
+- **Only tested on synthetic data and one published paper.** The tests use
+  synthetic spectra, and the validation uses values from a single study
+  (Policastro et al. 2023). No other real data set has been checked.
 - **Brasher-Kingsbury water uptake underestimates uptake.** The formula expects
   a dry-film reference capacitance. `water_uptake_series` and `metrics_table`
-  use the earliest immersion spectrum as the reference by default
-  (`reference="first"`), so any water absorbed before that first measurement is
-  missed.
+  use the earliest immersion spectrum with a valid coating capacitance as the
+  reference by default (`reference="first"`), so any water absorbed before that
+  measurement is missed.
 - **No real instrument export has been tested yet.** `load_instrument` reads
   Gamry, BioLogic, Autolab, and other vendor files through impedance.py's
   readers. However, it has only been exercised on synthetic data and CSV input,
   not on actual files from an instrument.
+- **`ml_feature_table` uses an older reference rule than `metrics_table`.** Its
+  water uptake is referenced to the first successful fit, while
+  `metrics_table` and `water_uptake_series` use the earliest fit with a valid
+  coating capacitance. The two can disagree when the first fit is degenerate.
+
+## Licence
+
+The licence has not been decided yet, and the repository has no licence
+file.

@@ -7,10 +7,9 @@ name = "eispipe"
 version = "0.1.0"
 description = "EIS analysis pipeline for organic coating degradation over immersion time"
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
+requires-python = ">=3.12"
 dependencies = [
-    "numpy>=1.24",
+    "numpy>=2.0",
     "scipy>=1.10",
     "pandas>=2.0",
     "matplotlib>=3.7",
@@ -18,10 +17,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "flask>=3.0"]
+dev = ["pytest>=7", "ruff>=0.17"]
+web = ["flask>=3.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # impedance.py's informational notice when predicting from initial parameters
+    "ignore:Simulating circuit based on initial parameters:UserWarning:impedance",
+]
+
+[tool.ruff]
+target-version = "py312"
+# first-party roots for import sorting: the package and the tests' helper modules
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "RUF100"]
