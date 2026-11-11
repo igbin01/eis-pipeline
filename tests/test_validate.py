@@ -165,3 +165,14 @@ def test_legacy_print_workaround_only_on_numpy2(monkeypatch, version, workaround
 
     assert r.error is None
     assert calls == ([{"legacy": "1.25"}] if workaround_applied else [])
+
+
+def test_kramers_kronig_zero_impedance_point_is_not_applicable_not_a_fail():
+    freq, Z = synth_degraded(noise=0.0)
+    Zbad = Z.copy()
+    Zbad[5] = 0.0 + 0.0j
+
+    r = kramers_kronig(Spectrum(freq, Zbad, sample_id="P1", immersion_time_h=24.0))
+
+    assert r.passed is False
+    assert r.error == "zero impedance point: test not applicable"

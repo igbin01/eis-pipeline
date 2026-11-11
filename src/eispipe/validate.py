@@ -68,9 +68,11 @@ class KKResult:
     sample_id, immersion_time_h:
         Carried from the spectrum for series bookkeeping.
     error:
-        ``None`` normally. If the Lin-KK computation itself raised, this holds
-        ``"<ExceptionType>: <message>"`` and ``passed`` is False -- a failure
-        of the test, not evidence about the data.
+        ``None`` normally. If the test could not be run -- the Lin-KK
+        computation raised (``"<ExceptionType>: <message>"``) or the spectrum
+        has a zero-impedance point (``"zero impedance point: test not
+        applicable"``) -- this says why and ``passed`` is False; that is a
+        failure to test, not evidence about the data.
     """
 
     freq: np.ndarray
@@ -179,7 +181,7 @@ def kramers_kronig(
         return _failed_result()
 
     if np.any(np.abs(spec.Z) == 0):
-        return _failed_result()
+        return _failed_result("zero impedance point: test not applicable")
 
     # Two library-interaction workarounds, both scoped to this call:
     #  - linKK prints progress to stdout every 10 RC elements -> silence it.
