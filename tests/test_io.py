@@ -355,3 +355,51 @@ def test_load_csv_hyphenated_imag_header_is_not_sign_flipped(tmp_path, imag_head
         s = load_csv(p)
 
     np.testing.assert_allclose(s.Z, Z, rtol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# C8 / C5: filename time pattern and absolute glob strings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, hours",
+    [
+        ("panelA_168h_run1.csv", 168.0),
+        ("panelA_168hours.csv", 168.0),
+        ("panelA_168h.csv", 168.0),
+        ("panelA_24hrs.csv", 24.0),
+        ("panelA_12 h.csv", 12.0),
+        ("panelA_168hx.csv", None),
+        ("168hx", None),
+    ],
+)
+def test_default_time_pattern(name, hours):
+    import re
+
+    from eispipe.io import DEFAULT_TIME_PATTERN
+
+    m = re.search(DEFAULT_TIME_PATTERN, name, re.IGNORECASE)
+    if hours is None:
+        assert m is None
+    else:
+        assert m is not None and float(m.group("time")) == hours
+
+
+def test_load_series_by_pattern_accepts_underscore_after_hours(tmp_path):
+    freq, Z = synth_coating()
+    write_csv(tmp_path / "panelA_168h_run1.csv", freq, Z)
+
+    series = load_series_by_pattern([tmp_path / "panelA_168h_run1.csv"])
+
+    np.testing.assert_allclose(series.times, [168.0])
+
+
+def test_load_series_by_pattern_absolute_glob_string(tmp_path):
+    freq, Z = synth_coating()
+    write_csv(tmp_path / "panel_0h.csv", freq, Z)
+    write_csv(tmp_path / "panel_24h.csv", freq, Z)
+
+    series = load_series_by_pattern(str(tmp_path / "panel_*h.csv"))
+
+    np.testing.assert_allclose(series.times, [0.0, 24.0])

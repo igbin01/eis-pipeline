@@ -378,9 +378,11 @@ def load_series(
     return SpectrumSeries(spectra)
 
 
-#: Default filename time pattern for :func:`load_series_by_pattern` -- a number
-#: immediately followed by ``h``/``hr``/``hrs``, e.g. ``panelA_168h.csv``.
-DEFAULT_TIME_PATTERN = r"(?P<time>\d+(?:\.\d+)?)\s*h(?:r|rs)?\b"
+#: Default filename time pattern for :func:`load_series_by_pattern` -- a number,
+#: optional whitespace, then ``h``/``hr``/``hrs``/``hour``/``hours`` not followed
+#: by another letter, e.g. ``panelA_168h.csv``, ``panelA_168h_run1.csv``,
+#: ``panelA_168hours.csv``, ``panelA_12 h.csv`` (but not ``168hx``).
+DEFAULT_TIME_PATTERN = r"(?P<time>\d+(?:\.\d+)?)\s*h(?:rs?|ours?)?(?![A-Za-z])"
 
 
 def load_series_by_pattern(
@@ -398,12 +400,20 @@ def load_series_by_pattern(
     contain a named group ``sample`` (used as ``sample_id`` when present).
     Files whose name does not match are skipped with a warning.
 
-    ``paths`` may be an iterable of paths or a single glob string. Extra
-    keyword metadata (e.g. ``area_cm2``, ``electrolyte``) is applied to every
-    spectrum, and does not override a ``sample`` captured from the name.
+    ``paths`` may be an iterable of paths or a single glob string, relative
+    (to the current directory) or absolute. Extra keyword metadata (e.g.
+    ``area_cm2``, ``electrolyte``) is applied to every spectrum, and does not
+    override a ``sample`` captured from the name.
     """
     if isinstance(paths, (str, Path)) and any(ch in str(paths) for ch in "*?["):
-        file_list = sorted(Path().glob(str(paths)))
+        # pathlib only globs relative patterns: glob absolute ones from their anchor.
+        pattern_path = Path(paths)
+        if pattern_path.is_absolute():
+            root = Path(pattern_path.anchor)
+            rel_pattern = str(pattern_path.relative_to(root))
+        else:
+            root, rel_pattern = Path(), str(pattern_path)
+        file_list = sorted(root.glob(rel_pattern))
     elif isinstance(paths, (str, Path)):
         file_list = [Path(paths)]
     else:
