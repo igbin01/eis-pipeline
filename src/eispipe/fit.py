@@ -74,6 +74,11 @@ class FitResult:
         ``None`` if KK was not run.
     sample_id, immersion_time_h, area_cm2:
         Carried from the spectrum.
+    param_names:
+        Parameter names in circuit order, used by :meth:`predict`. Set by
+        :func:`fit_spectrum` / :func:`fit_series` from the model used; if left
+        ``None`` it defaults to the registry model's names (stays ``None`` for
+        a name not in the registry).
     """
 
     model_name: str
@@ -92,32 +97,42 @@ class FitResult:
     sample_id: str | None = None
     immersion_time_h: float | None = None
     area_cm2: float | None = None
+    param_names: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.param_names is None:
+            try:
+                self.param_names = get_model(self.model_name).param_names
+            except KeyError:
+                pass  # custom model: predict() needs param_names set explicitly
+        else:
+            self.param_names = tuple(self.param_names)
 
     def predict(self, freq: np.ndarray | None = None) -> np.ndarray:
-        """Impedance of the fitted circuit at *freq* (default: the fit grid)."""
+        """Impedance of the fitted circuit at *freq* (default: the fit grid).
+
+        Evaluates ``circuit`` with ``params`` taken in ``param_names`` order;
+        works for any model, registry or custom. ``param_errors`` is not used.
+        """
         if not self.success:
             raise RuntimeError("fit did not succeed; no model to predict from")
         if freq is None:
             return self.Z_fit
         from impedance.models.circuits import CustomCircuit
 
-        cm = get_model(self.model_name)
-        missing_params = [n for n in cm.param_names if n not in self.params]
+        if self.param_names is None:
+            raise ValueError(
+                f"param_names is not set and {self.model_name!r} is not a registry model"
+            )
+        missing_params = [n for n in self.param_names if n not in self.params]
         if missing_params:
             raise ValueError(
-                f"params is missing {missing_params} required by {cm.param_names!r}"
+                f"params is missing {missing_params} required by {self.param_names!r}"
             )
-        missing_errors = [n for n in cm.param_names if n not in self.param_errors]
-        if missing_errors:
-            raise ValueError(
-                f"param_errors is missing {missing_errors} required by {cm.param_names!r}"
-            )
-        values = [self.params[n] for n in cm.param_names]
-        errors = [self.param_errors[n] for n in cm.param_names]
+        values = [self.params[n] for n in self.param_names]
 
         cc = CustomCircuit(self.circuit, initial_guess=values)
         cc.parameters_ = np.array(values, dtype=float)
-        cc.conf_ = np.array(errors, dtype=float)
         grid = np.asarray(freq, dtype=float)
         return cc.predict(grid)
 
@@ -270,6 +285,7 @@ def fit_spectrum(
         sample_id=spec.sample_id,
         immersion_time_h=spec.immersion_time_h,
         area_cm2=spec.area_cm2,
+        param_names=cm.param_names,
     )
 
 
@@ -350,6 +366,7 @@ def fit_series(
                 sample_id=spec.sample_id,
                 immersion_time_h=spec.immersion_time_h,
                 area_cm2=spec.area_cm2,
+                param_names=cm.param_names,
             )
 
         if validate:

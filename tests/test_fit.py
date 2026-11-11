@@ -370,3 +370,61 @@ def test_fit_series_still_raises_on_bad_weighting():
     series = SpectrumSeries([Spectrum(freq, Z, immersion_time_h=0.0)])
     with pytest.raises(ValueError, match="weighting"):
         fit_series(series, "degraded_coating", weighting="l2", validate=False)
+
+
+# ---------------------------------------------------------------------------
+# C10: predict works for any CircuitModel and needs only params
+# ---------------------------------------------------------------------------
+
+
+def test_predict_works_for_custom_model_not_in_registry():
+    from eispipe.models import MODELS, CircuitModel
+
+    from helpers import synth_coating
+
+    custom = CircuitModel(
+        name="r_rc_custom",
+        circuit="R0-p(R1,C1)",
+        param_names=("R_s", "R_p", "C"),
+        units=("Ohm", "Ohm", "F"),
+        description="ideal R-(R||C), not registered",
+        _guess=lambda spec: [40.0, 5_000.0, 1e-7],
+    )
+    assert custom.name not in MODELS
+
+    freq, Z = synth_coating(R0=50.0, Rpo=8_000.0, C=2e-7)
+    res = fit_spectrum(Spectrum(freq, Z), custom, weighting="none")
+    assert res.param_names == ("R_s", "R_p", "C")
+
+    grid = np.logspace(3, -1, 17)
+    w = 2 * np.pi * grid
+    expected = 50.0 + 1.0 / (1.0 / 8_000.0 + 1j * w * 2e-7)
+    np.testing.assert_allclose(res.predict(grid), expected, rtol=1e-4)
+
+
+def test_predict_needs_only_params():
+    freq, Z = synth_degraded(noise=0.0)
+    res = fit_spectrum(Spectrum(freq, Z), "degraded_coating")
+    res.param_errors = {}
+
+    grid = np.logspace(3, -1, 9)
+    Z_pred = res.predict(grid)
+
+    assert Z_pred.shape == grid.shape and np.all(np.isfinite(Z_pred))
+
+
+def test_param_names_default_from_registry_for_manual_results():
+    cm = get_model("intact_coating")
+    res = FitResult(
+        model_name="intact_coating",
+        circuit=cm.circuit,
+        params=dict(zip(cm.param_names, [40.0, 8_000.0, 2e-7, 0.9])),
+        param_errors={},
+        freq=np.logspace(4, -1, 5),
+        Z_data=np.ones(5, complex),
+        Z_fit=np.ones(5, complex),
+        rmse=0.0,
+        chi2_norm=0.0,
+        weighting="none",
+    )
+    assert res.param_names == cm.param_names
