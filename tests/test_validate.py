@@ -101,6 +101,7 @@ def test_validate_series_frame():
         "max_resid",
         "rms_resid",
         "passed",
+        "error",
     ]
     assert list(df["immersion_time_h"]) == [0.0, 24.0, 168.0]
     assert df["passed"].all()
@@ -176,3 +177,21 @@ def test_kramers_kronig_zero_impedance_point_is_not_applicable_not_a_fail():
 
     assert r.passed is False
     assert r.error == "zero impedance point: test not applicable"
+
+
+def test_validate_series_reports_error_column():
+    freq, Z = synth_degraded(noise=0.0)
+    Zbad = Z.copy()
+    Zbad[5] = 0.0 + 0.0j
+    series = SpectrumSeries(
+        [
+            Spectrum(freq, Z, sample_id="P1", immersion_time_h=0.0),
+            Spectrum(freq, Zbad, sample_id="P1", immersion_time_h=24.0),
+        ]
+    )
+
+    df = validate_series(series)
+
+    assert "error" in df.columns
+    assert list(df["error"]) == [None, "zero impedance point: test not applicable"]
+    assert list(df["passed"]) == [True, False]

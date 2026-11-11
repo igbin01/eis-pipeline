@@ -231,8 +231,9 @@ def validate_series(series: SpectrumSeries, **kwargs) -> pd.DataFrame:
     """Run :func:`kramers_kronig` on every spectrum in *series*.
 
     Returns one row per immersion time: ``sample_id, immersion_time_h, M, mu,
-    max_resid, rms_resid, passed``. Keyword arguments pass through to
-    :func:`kramers_kronig`.
+    max_resid, rms_resid, passed, error`` (``error`` is
+    :attr:`KKResult.error`: ``None``, or why the test could not be run).
+    Keyword arguments pass through to :func:`kramers_kronig`.
     """
     rows = []
     for spec in series:
@@ -246,6 +247,10 @@ def validate_series(series: SpectrumSeries, **kwargs) -> pd.DataFrame:
                 "max_resid": r.max_resid,
                 "rms_resid": r.rms_resid,
                 "passed": r.passed,
+                "error": r.error,
             }
         )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # object dtype keeps None for "no error" (string inference would make it NaN)
+    df["error"] = pd.Series([row["error"] for row in rows], index=df.index, dtype=object)
+    return df
