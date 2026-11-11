@@ -728,6 +728,7 @@
 
     fetch("/api/upload", {
       method: "POST",
+      headers: { "X-Requested-With": "eispipe" },
       body: fd,
     })
       .then((r) => r.json())
@@ -776,6 +777,7 @@
 
     fetch("/api/upload", {
       method: "POST",
+      headers: { "X-Requested-With": "eispipe" },
       body: fd,
     })
       .then((r) => r.json())

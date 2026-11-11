@@ -4,9 +4,12 @@ import base64
 import io
 import json
 import math
+import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -42,7 +45,43 @@ APP_DIR = Path(__file__).resolve().parent
 # No static folder: only the page itself is served, never the app/ directory.
 app = Flask(__name__, static_folder=None)
 
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_SPECTRUM_FILES = 64
+JOB_TTL_S = 30 * 60  # jobs never streamed within this time are dropped
+ALLOWED_HOSTS = frozenset({"127.0.0.1:5050", "localhost:5050"})
+ALLOWED_ORIGINS = frozenset(f"http://{host}" for host in ALLOWED_HOSTS)
+
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+app.config["MAX_FORM_PARTS"] = MAX_SPECTRUM_FILES + 16  # spectra + manifest + form fields
+
 jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+
+
+@app.before_request
+def _check_request_origin():
+    """Only accept API calls addressed to this local server from its own page."""
+    if not request.path.startswith("/api/"):
+        return None
+    if request.host not in ALLOWED_HOSTS:
+        return jsonify({"error": "forbidden host"}), 403
+    origin = request.headers.get("Origin")
+    if request.method == "POST" and origin is not None and origin not in ALLOWED_ORIGINS:
+        return jsonify({"error": "forbidden origin"}), 403
+    if request.path == "/api/upload" and request.headers.get("X-Requested-With") != "eispipe":
+        return jsonify({"error": "missing X-Requested-With: eispipe header"}), 403
+    return None
+
+
+@app.errorhandler(413)
+def _upload_too_large(_exc):
+    limit_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+    return jsonify(
+        {
+            "error": f"upload too large (limit {limit_mb} MB and "
+            f"{app.config['MAX_FORM_PARTS']} form parts)"
+        }
+    ), 413
 
 
 def _json_safe(value: Any) -> Any:
@@ -82,16 +121,23 @@ def _emit_event(stage: str, status: str, **extra: Any) -> str:
     return f"event: update\ndata: {serialized}\n\n"
 
 
-def _cleanup_job(job_id: str) -> None:
-    job = jobs.get(job_id)
-    if job:
-        tmpdir = job.get("tmpdir")
-        if isinstance(tmpdir, str):
-            try:
-                shutil.rmtree(tmpdir, ignore_errors=True)
-            except Exception:
-                pass
-        jobs.pop(job_id, None)
+def _register_job(job: dict[str, Any]) -> None:
+    with _jobs_lock:
+        jobs[job["job_id"]] = job
+
+
+def _expire_jobs() -> None:
+    cutoff = time.monotonic() - JOB_TTL_S
+    with _jobs_lock:
+        for job_id in [j for j, job in jobs.items() if job["created"] < cutoff]:
+            del jobs[job_id]
+
+
+def _strip_temp_paths(message: str, tmpdir: Path) -> str:
+    """Remove the job temp dir from *message*, leaving bare file names."""
+    for prefix in {str(tmpdir.resolve()), str(tmpdir)}:
+        message = message.replace(prefix + os.sep, "").replace(prefix, "")
+    return message
 
 
 class _UploadRejected(ValueError):
@@ -125,9 +171,10 @@ def upload():
     if not use_demo:
         use_demo = str(request.form.get("use_demo", "")).lower() in {"1", "true", "yes", "on"}
 
+    _expire_jobs()
     job_id = uuid.uuid4().hex
     tmpdir = Path(tempfile.mkdtemp(prefix="eispipe_job_"))
-    job = {"job_id": job_id, "model": model, "tmpdir": str(tmpdir), "series": None}
+    job = {"job_id": job_id, "model": model, "created": time.monotonic(), "series": None}
 
     try:
         if use_demo:
@@ -138,11 +185,13 @@ def upload():
                 for i, t in enumerate(IMMERSION_TIMES_H)
             ]
             job["series"] = SpectrumSeries(spectra)
-            jobs[job_id] = job
+            _register_job(job)
             return jsonify({"job_id": job_id})
 
         files = request.files.getlist("file") or request.files.getlist("files") or []
         manifest_file = request.files.get("manifest") or request.files.get("manifest_csv")
+        if len(files) > MAX_SPECTRUM_FILES:
+            return jsonify({"error": f"too many files (max {MAX_SPECTRUM_FILES})"}), 400
 
         if manifest_file:
             manifest_path = _save_upload(manifest_file, tmpdir, "manifest")
@@ -156,7 +205,7 @@ def upload():
             ]
             series = load_series(manifest, data_dir=tmpdir)
             job["series"] = series
-            jobs[job_id] = job
+            _register_job(job)
             return jsonify({"job_id": job_id})
 
         if len(files) == 1:
@@ -173,22 +222,27 @@ def upload():
                 meta["area_cm2"] = float(area_cm2)
             spec = load_csv(csv_path, **meta)
             job["series"] = SpectrumSeries([spec])
-            jobs[job_id] = job
+            _register_job(job)
             return jsonify({"job_id": job_id})
 
         return jsonify({"error": "upload requires either one CSV or a manifest CSV + files, or the demo flag"}), 400
-    except _UploadRejected as exc:
-        _cleanup_job(job_id)
-        return jsonify({"error": str(exc)}), 400
+    except ValueError as exc:
+        # Our own loader/validation messages (incl. _UploadRejected): specific
+        # but with the temp dir stripped.
+        return jsonify({"error": _strip_temp_paths(str(exc), tmpdir)}), 400
     except Exception:
         app.logger.exception("upload %s failed", job_id)
-        _cleanup_job(job_id)
         return jsonify({"error": "could not load the uploaded files"}), 400
+    finally:
+        # Spectra are fully in memory by now; the uploaded files are not needed.
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @app.get("/api/run/<job_id>")
 def run_job(job_id: str):
-    job = jobs.get(job_id)
+    _expire_jobs()
+    with _jobs_lock:
+        job = jobs.get(job_id)
     if job is None:
         return jsonify({"error": "unknown job_id"}), 404
 
@@ -309,7 +363,14 @@ def run_job(job_id: str):
             rpo_vs_time_image_png_base64=rpo_png,
         )
 
-    return Response(stream_with_context(_stream()), mimetype="text/event-stream")
+    def _stream_then_drop_job():
+        try:
+            yield from _stream()
+        finally:
+            with _jobs_lock:
+                jobs.pop(job_id, None)
+
+    return Response(stream_with_context(_stream_then_drop_job()), mimetype="text/event-stream")
 
 
 if __name__ == "__main__":
