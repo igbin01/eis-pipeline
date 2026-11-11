@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import io
 import json
 import math
 import os
+import queue
+import secrets
 import shutil
 import sys
 import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import matplotlib
 import numpy as np
-from flask import Flask, Response, jsonify, request, send_file, stream_with_context
+from flask import Flask, Response, g, jsonify, request
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 matplotlib.use("Agg")
@@ -42,35 +48,133 @@ from eispipe.validate import validate_series  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 
+
+# ---------------------------------------------------------------------------
+# configuration (environment; with nothing set, the local defaults apply)
+# ---------------------------------------------------------------------------
+
+
+def _env_positive(name: str, default: float, cast=int):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    value = cast(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {raw!r}")
+    return value
+
+
+#: Host header values accepted on /api/* (and, with http/https, as Origin).
+ALLOWED_HOSTS = frozenset(
+    host.strip().lower()
+    for host in (
+        os.environ.get("EISPIPE_ALLOWED_HOSTS", "").strip() or "127.0.0.1:5050,localhost:5050"
+    ).split(",")
+    if host.strip()
+)
+#: If set, every request except /healthz needs HTTP Basic auth with this password.
+PASSWORD = os.environ.get("EISPIPE_PASSWORD") or None
+#: Trust X-Forwarded-For (one proxy hop) for the client address.
+TRUST_PROXY = os.environ.get("EISPIPE_TRUST_PROXY", "").strip() == "1"
+MAX_JOBS = _env_positive("EISPIPE_MAX_JOBS", 2)
+MAX_UPLOAD_BYTES = _env_positive("EISPIPE_MAX_UPLOAD_MB", 25) * 1024 * 1024
+MAX_SPECTRUM_FILES = _env_positive("EISPIPE_MAX_FILES", 64)
+JOB_TIMEOUT_S = _env_positive("EISPIPE_JOB_TIMEOUT_S", 300, float)
+UPLOADS_PER_MINUTE = 10  # per client address
+HEARTBEAT_S = 15  # SSE comment interval while a stage is running
+JOB_TTL_S = 30 * 60  # jobs never streamed within this time are dropped
+
 # No static folder: only the page itself is served, never the app/ directory.
 app = Flask(__name__, static_folder=None)
-
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-MAX_SPECTRUM_FILES = 64
-JOB_TTL_S = 30 * 60  # jobs never streamed within this time are dropped
-ALLOWED_HOSTS = frozenset({"127.0.0.1:5050", "localhost:5050"})
-ALLOWED_ORIGINS = frozenset(f"http://{host}" for host in ALLOWED_HOSTS)
+if TRUST_PROXY:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 app.config["MAX_FORM_PARTS"] = MAX_SPECTRUM_FILES + 16  # spectra + manifest + form fields
 
 jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
+_job_slots = threading.BoundedSemaphore(MAX_JOBS)
+_upload_log: dict[str, deque[float]] = {}
+_upload_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# request checks and response headers
+# ---------------------------------------------------------------------------
+
+
+@app.before_request
+def _require_password():
+    """HTTP Basic auth (any username) when EISPIPE_PASSWORD is set."""
+    if PASSWORD is None or request.path == "/healthz":
+        return None
+    auth = request.authorization
+    supplied = auth.password if auth is not None and auth.type == "basic" else None
+    if supplied is not None and hmac.compare_digest(supplied.encode(), PASSWORD.encode()):
+        return None
+    return Response(
+        "authentication required\n",
+        401,
+        {"WWW-Authenticate": 'Basic realm="eispipe", charset="UTF-8"'},
+        mimetype="text/plain",
+    )
+
+
+def _origin_allowed(origin: str) -> bool:
+    parts = urlsplit(origin)
+    return parts.scheme in ("http", "https") and parts.netloc.lower() in ALLOWED_HOSTS
 
 
 @app.before_request
 def _check_request_origin():
-    """Only accept API calls addressed to this local server from its own page."""
+    """Only accept API calls addressed to an allowed host from its own page."""
     if not request.path.startswith("/api/"):
         return None
-    if request.host not in ALLOWED_HOSTS:
+    if request.host.lower() not in ALLOWED_HOSTS:
         return jsonify({"error": "forbidden host"}), 403
     origin = request.headers.get("Origin")
-    if request.method == "POST" and origin is not None and origin not in ALLOWED_ORIGINS:
+    if request.method == "POST" and origin is not None and not _origin_allowed(origin):
         return jsonify({"error": "forbidden origin"}), 403
     if request.path == "/api/upload" and request.headers.get("X-Requested-With") != "eispipe":
         return jsonify({"error": "missing X-Requested-With: eispipe header"}), 403
     return None
+
+
+@app.after_request
+def _security_headers(response):
+    nonce = g.get("csp_nonce")
+    inline = f" 'nonce-{nonce}'" if nonce else ""
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        f"script-src 'self'{inline}; "
+        f"style-src 'self'{inline}; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
+
+
+def _allow_upload(client: str) -> bool:
+    """Sliding one-minute window of upload attempts per client address."""
+    now = time.monotonic()
+    with _upload_lock:
+        log = _upload_log.setdefault(client, deque())
+        while log and now - log[0] >= 60:
+            log.popleft()
+        if len(log) >= UPLOADS_PER_MINUTE:
+            return False
+        log.append(now)
+        if len(_upload_log) > 10_000:  # forget idle clients so the dict stays small
+            for key in [k for k, v in _upload_log.items() if not v or now - v[-1] >= 60]:
+                del _upload_log[key]
+        return True
 
 
 @app.errorhandler(413)
@@ -110,7 +214,18 @@ def _json_safe(value: Any) -> Any:
 
 @app.get("/")
 def index():
-    return send_file(APP_DIR / "index.html")
+    # The page's inline <script> and <style> run under a per-request CSP nonce.
+    nonce = secrets.token_urlsafe(16)
+    g.csp_nonce = nonce
+    html = (APP_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("<script>", f'<script nonce="{nonce}">', 1)
+    html = html.replace("<style>", f'<style nonce="{nonce}">', 1)
+    return Response(html, mimetype="text/html")
+
+
+@app.get("/healthz")
+def healthz():
+    return Response("ok", mimetype="text/plain")
 
 
 def _emit_event(stage: str, status: str, **extra: Any) -> str:
@@ -166,6 +281,12 @@ def _resolve_manifest_row(name: str, stored: dict[str, Path], tmpdir: Path) -> s
 
 @app.post("/api/upload")
 def upload():
+    if not _allow_upload(request.remote_addr or "unknown"):
+        return (
+            jsonify({"error": "too many uploads, try again in a minute"}),
+            429,
+            {"Retry-After": "60"},
+        )
     model = request.form.get("model") or "degraded_coating"
     use_demo = str(request.form.get("use_demo_data", "")).lower() in {"1", "true", "yes", "on"}
     if not use_demo:
@@ -240,6 +361,39 @@ def upload():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class _JobCancelled(BaseException):
+    """Stops a job's worker thread at its next checkpoint.
+
+    A BaseException so the stages' broad ``except Exception`` handlers let it
+    through to the worker instead of reporting a failed stage.
+    """
+
+
+class _JobSlot:
+    """One acquired slot of ``_job_slots``; ``release`` is idempotent."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held = True
+
+    def release(self) -> None:
+        with self._lock:
+            if not self._held:
+                return
+            self._held = False
+        _job_slots.release()
+
+
+_DONE = object()  # end-of-stream marker from a job's worker thread
+
+
+def _stage_of(chunk: str, default: str) -> str:
+    try:
+        return json.loads(chunk.split("data: ", 1)[1])["stage"]
+    except (IndexError, ValueError, KeyError, TypeError):
+        return default
+
+
 @app.get("/api/run/<job_id>")
 def run_job(job_id: str):
     _expire_jobs()
@@ -247,6 +401,10 @@ def run_job(job_id: str):
         job = jobs.get(job_id)
     if job is None:
         return jsonify({"error": "unknown job_id"}), 404
+    if not _job_slots.acquire(blocking=False):
+        return jsonify({"error": "busy, try again in a minute"}), 503, {"Retry-After": "60"}
+    slot = _JobSlot()
+    cancel = threading.Event()
 
     def _stream():
         series_obj = job["series"]
@@ -277,6 +435,8 @@ def run_job(job_id: str):
         fit_events = []
 
         def on_progress(index: int, total: int, result: Any) -> None:
+            if cancel.is_set():  # timed out or client gone: stop after this spectrum
+                raise _JobCancelled
             if result.success:
                 fit_events.append(
                     {
@@ -367,14 +527,68 @@ def run_job(job_id: str):
             rpo_vs_time_image_png_base64=rpo_png,
         )
 
-    def _stream_then_drop_job():
+    events: queue.Queue = queue.Queue()
+    worker_started = threading.Event()
+
+    def _work():
+        """Run the pipeline stages in this thread, handing events to the stream."""
+        stages = _stream()
         try:
-            yield from _stream()
+            for chunk in stages:
+                if cancel.is_set():
+                    break
+                events.put(chunk)
+        except _JobCancelled:
+            pass
+        except Exception:
+            # Intentionally broad: the stages report their own failures; this
+            # only catches the unexpected so the slot is always released.
+            app.logger.exception("job %s: worker failed", job_id)
         finally:
+            stages.close()
+            slot.release()
+            events.put(_DONE)
+
+    def _stream_with_limits():
+        worker_started.set()
+        threading.Thread(target=_work, name=f"eispipe-job-{job_id[:8]}", daemon=True).start()
+        deadline = time.monotonic() + JOB_TIMEOUT_S
+        stage = "load"
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    app.logger.warning("job %s exceeded %g s", job_id, JOB_TIMEOUT_S)
+                    yield _emit_event(
+                        stage, "failed", message=f"job exceeded the {JOB_TIMEOUT_S:g} s time limit"
+                    )
+                    return
+                try:
+                    chunk = events.get(timeout=min(HEARTBEAT_S, remaining))
+                except queue.Empty:
+                    if time.monotonic() < deadline:
+                        yield ": heartbeat\n\n"  # keeps proxies from closing an idle stream
+                    continue
+                if chunk is _DONE:
+                    return
+                stage = _stage_of(chunk, stage)
+                yield chunk
+        finally:
+            cancel.set()  # finished, timed out or client gone: stop the worker
             with _jobs_lock:
                 jobs.pop(job_id, None)
 
-    return Response(stream_with_context(_stream_then_drop_job()), mimetype="text/event-stream")
+    def _release_if_never_started() -> None:
+        # A client that disconnects before the stream starts never runs the
+        # worker, whose ``finally`` would otherwise release the slot.
+        if not worker_started.is_set():
+            slot.release()
+
+    response = Response(_stream_with_limits(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.call_on_close(_release_if_never_started)
+    return response
 
 
 if __name__ == "__main__":

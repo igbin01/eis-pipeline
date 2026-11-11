@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -29,11 +30,20 @@ def server():
     # Flask derives its root_path from sys.modules[import_name]; without this it
     # falls back to the cwd and static/index lookups go to the wrong directory.
     sys.modules[name] = module
+    # The module reads EISPIPE_* at import; load it with the local defaults.
+    saved = {k: os.environ.pop(k) for k in [k for k in os.environ if k.startswith("EISPIPE_")]}
     try:
         spec.loader.exec_module(module)
         yield module
     finally:
+        os.environ.update(saved)
         sys.modules.pop(name, None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_upload_rate_limit(server):
+    """This module shares one server across many tests; reset the per-IP limit."""
+    server._upload_log.clear()
 
 
 ALLOWED_BASE_URL = "http://localhost:5050"
