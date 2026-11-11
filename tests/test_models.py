@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from conftest import synth_degraded
 from eispipe.models import (
     DEGRADED_COATING,
     INTACT_COATING,
@@ -13,7 +14,6 @@ from eispipe.models import (
     get_model,
 )
 from eispipe.spectrum import Spectrum
-from conftest import synth_degraded
 from helpers import synth_coating
 
 

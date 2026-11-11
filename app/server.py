@@ -14,9 +14,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 import matplotlib
+import numpy as np
+from flask import Flask, Response, jsonify, request, send_file, stream_with_context
+from werkzeug.utils import secure_filename
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -30,15 +31,14 @@ SCRIPTS = REPO_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from flask import Flask, Response, jsonify, request, send_file, stream_with_context
-from werkzeug.utils import secure_filename
-
-from eispipe.fit import fit_series
-from eispipe.io import load_csv, load_manifest, load_series
-from eispipe.metrics import metrics_table
-from eispipe.plots import bode, plot_metric
-from eispipe.spectrum import Spectrum, SpectrumSeries
-from eispipe.validate import validate_series
+# eispipe is imported after the sys.path setup above so the app also runs from
+# a source checkout where the package is not installed.
+from eispipe.fit import fit_series  # noqa: E402
+from eispipe.io import load_csv, load_manifest, load_series  # noqa: E402
+from eispipe.metrics import metrics_table  # noqa: E402
+from eispipe.plots import bode, plot_metric  # noqa: E402
+from eispipe.spectrum import Spectrum, SpectrumSeries  # noqa: E402
+from eispipe.validate import validate_series  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -231,6 +231,8 @@ def upload():
         # but with the temp dir stripped.
         return jsonify({"error": _strip_temp_paths(str(exc), tmpdir)}), 400
     except Exception:
+        # Intentionally broad: any unexpected failure becomes a generic 400;
+        # details go to the server log only.
         app.logger.exception("upload %s failed", job_id)
         return jsonify({"error": "could not load the uploaded files"}), 400
     finally:
@@ -265,6 +267,8 @@ def run_job(job_id: str):
             kk_records = kk_df.to_dict(orient="records")
             yield _emit_event("validate", "done", message="KK validation complete", kk_pass_fail=kk_records)
         except Exception:
+            # Intentionally broad (all stages): report a failed stage to the
+            # client instead of breaking the event stream; details are logged.
             app.logger.exception("job %s: validation failed", job_id)
             yield _emit_event("validate", "failed", message="KK validation failed")
 
@@ -298,7 +302,7 @@ def run_job(job_id: str):
 
         try:
             fits = fit_series(series_obj, model, validate=True, on_progress=on_progress)
-        except Exception:
+        except Exception:  # intentionally broad: see the validation stage
             app.logger.exception("job %s: fitting failed", job_id)
             yield _emit_event("fit", "failed", message="fitting failed")
             return
@@ -320,7 +324,7 @@ def run_job(job_id: str):
         try:
             metrics = metrics_table(fits)
             metrics_records = metrics.to_dict(orient="records")
-        except Exception:
+        except Exception:  # intentionally broad: see the validation stage
             app.logger.exception("job %s: metrics failed", job_id)
             yield _emit_event("metrics", "failed", message="metrics computation failed")
             return
@@ -348,7 +352,7 @@ def run_job(job_id: str):
 
             bode_png = base64.b64encode(bode_buf.getvalue()).decode("ascii")
             rpo_png = base64.b64encode(rpo_buf.getvalue()).decode("ascii")
-        except Exception:
+        except Exception:  # intentionally broad: see the validation stage
             app.logger.exception("job %s: plotting failed", job_id)
             yield _emit_event("plot", "failed", message="plotting failed")
             return

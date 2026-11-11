@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import matplotlib
-import numpy as np
 import pandas as pd
 import pytest
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
-from eispipe import plots  # noqa: E402
-from eispipe.fit import fit_spectrum  # noqa: E402
-from eispipe.spectrum import Spectrum, SpectrumSeries  # noqa: E402
-from eispipe.validate import kramers_kronig  # noqa: E402
-from conftest import synth_degraded  # noqa: E402
-from helpers import synth_coating  # noqa: E402
+from conftest import synth_degraded
+from eispipe import plots
+from eispipe.fit import fit_spectrum
+from eispipe.spectrum import Spectrum, SpectrumSeries
+from eispipe.validate import kramers_kronig
+from helpers import synth_coating
 
 
 @pytest.fixture(autouse=True)

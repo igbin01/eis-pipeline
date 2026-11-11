@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from conftest import synth_degraded
 from eispipe.spectrum import Spectrum, SpectrumSeries
 from eispipe.validate import KKResult, kramers_kronig, validate_series
-from conftest import synth_degraded
 from helpers import synth_coating
 
 
@@ -138,34 +138,6 @@ def test_kramers_kronig_library_exception_sets_error_and_warns(monkeypatch):
     assert r.passed is False
     assert r.error is not None
     assert "RuntimeError" in r.error and "linKK exploded" in r.error
-
-
-@pytest.mark.parametrize("version, workaround_applied", [("1.26.4", False), ("2.0.0", True)])
-def test_legacy_print_workaround_only_on_numpy2(monkeypatch, version, workaround_applied):
-    import contextlib
-
-    import impedance.validation
-
-    import eispipe.validate as validate_mod
-
-    calls = []
-
-    def spy_printoptions(**kwargs):
-        calls.append(kwargs)
-        return contextlib.nullcontext()
-
-    def fake_linkk(freq, Z, **kwargs):
-        zeros = np.zeros(len(freq))
-        return 5, 0.5, np.asarray(Z), zeros, zeros
-
-    monkeypatch.setattr(validate_mod, "_numpy_version", lambda: version)
-    monkeypatch.setattr(validate_mod.np, "printoptions", spy_printoptions)
-    monkeypatch.setattr(impedance.validation, "linKK", fake_linkk)
-
-    r = kramers_kronig(_clean_spec())
-
-    assert r.error is None
-    assert calls == ([{"legacy": "1.25"}] if workaround_applied else [])
 
 
 def test_kramers_kronig_zero_impedance_point_is_not_applicable_not_a_fail():

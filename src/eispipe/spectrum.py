@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator
 
 import numpy as np
 import pandas as pd
@@ -143,7 +143,7 @@ class Spectrum:
 
     # -- transforms --------------------------------------------------------
 
-    def with_metadata(self, **changes) -> "Spectrum":
+    def with_metadata(self, **changes) -> Spectrum:
         """Return a copy with some metadata fields replaced.
 
         Only names in :data:`META_FIELDS` are accepted.
@@ -153,7 +153,7 @@ class Spectrum:
             raise TypeError(f"unknown metadata field(s): {sorted(bad)}")
         return replace(self, **changes)
 
-    def _replace_data(self, freq: np.ndarray, Z: np.ndarray) -> "Spectrum":
+    def _replace_data(self, freq: np.ndarray, Z: np.ndarray) -> Spectrum:
         """Return a copy with new arrays and identical metadata."""
         return replace(self, freq=freq, Z=Z)
 

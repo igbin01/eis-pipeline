@@ -82,7 +82,7 @@ def nyquist_series(series: SpectrumSeries, *, ax=None, cmap="viridis", colorbar=
     norm = Normalize(vmin=float(times.min()), vmax=float(times.max()))
     cmap_obj = plt.get_cmap(cmap)
 
-    for spec, t in zip(series, times):
+    for spec, t in zip(series, times, strict=True):
         ax.plot(
             spec.Z.real,
             -spec.Z.imag,

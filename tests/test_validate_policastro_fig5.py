@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import validate_policastro_fig5 as v  # noqa: E402
+import validate_policastro_fig5 as v
 
 AREA = v.AREA_CM2
 

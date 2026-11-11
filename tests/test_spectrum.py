@@ -8,7 +8,6 @@ import pytest
 from eispipe.spectrum import META_FIELDS, Spectrum, SpectrumSeries
 from helpers import synth_coating
 
-
 # --------------------------------------------------------------------------
 # Spectrum construction & validation
 # --------------------------------------------------------------------------

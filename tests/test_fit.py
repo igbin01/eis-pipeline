@@ -7,11 +7,11 @@ import inspect
 import numpy as np
 import pytest
 
+from conftest import synth_degraded
 from eispipe.fit import FitResult, FitSeries, fit_series, fit_spectrum
 from eispipe.models import get_model
 from eispipe.spectrum import Spectrum, SpectrumSeries
 from eispipe.validate import kramers_kronig
-from conftest import synth_degraded
 
 
 def _degraded_series(times=(0.0, 24.0, 72.0, 168.0), noise=0.01):
@@ -379,7 +379,6 @@ def test_fit_series_still_raises_on_bad_weighting():
 
 def test_predict_works_for_custom_model_not_in_registry():
     from eispipe.models import MODELS, CircuitModel
-
     from helpers import synth_coating
 
     custom = CircuitModel(
@@ -418,7 +417,7 @@ def test_param_names_default_from_registry_for_manual_results():
     res = FitResult(
         model_name="intact_coating",
         circuit=cm.circuit,
-        params=dict(zip(cm.param_names, [40.0, 8_000.0, 2e-7, 0.9])),
+        params=dict(zip(cm.param_names, [40.0, 8_000.0, 2e-7, 0.9], strict=True)),
         param_errors={},
         freq=np.logspace(4, -1, 5),
         Z_data=np.ones(5, complex),

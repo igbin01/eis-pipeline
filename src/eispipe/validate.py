@@ -98,23 +98,6 @@ class KKResult:
         )
 
 
-def _numpy_version() -> str:
-    return np.__version__
-
-
-def _legacy_print_options():
-    """``np.printoptions(legacy="1.25")`` on NumPy >= 2, else a no-op.
-
-    impedance 1.7.1's eval_linKK builds a circuit string from repr() of NumPy
-    scalars; NumPy 2 changed that repr to "np.float64(...)", which then fails
-    to eval. The "1.25" legacy mode restores the bare-number repr, but it only
-    exists from NumPy 2.0 -- and NumPy 1.x already prints bare numbers.
-    """
-    if int(_numpy_version().split(".")[0]) >= 2:
-        return np.printoptions(legacy="1.25")
-    return contextlib.nullcontext()
-
-
 def kramers_kronig(
     spec: Spectrum,
     *,
@@ -178,22 +161,23 @@ def kramers_kronig(
             error=error,
         )
 
-    if spec.freq.size == 0:
-        return _failed_result()
-
     if np.any(np.abs(spec.Z) == 0):
         return _failed_result("zero impedance point: test not applicable")
 
     # Two library-interaction workarounds, both scoped to this call:
     #  - linKK prints progress to stdout every 10 RC elements -> silence it.
-    #  - NumPy >= 2 scalar repr breaks impedance's eval_linKK; see
-    #    _legacy_print_options.
+    #  - impedance 1.7.1's eval_linKK builds a circuit string with repr() of
+    #    NumPy scalars; under NumPy >= 2 (required) that repr is
+    #    "np.float64(...)", which then fails to eval. legacy='1.25' printing
+    #    restores the bare-number repr it expects.
     try:
-        with contextlib.redirect_stdout(_io.StringIO()), _legacy_print_options():
+        with contextlib.redirect_stdout(_io.StringIO()), np.printoptions(legacy="1.25"):
             M, mu, Z_fit, resid_real, resid_imag = linKK(
                 spec.freq, spec.Z, c=c, max_M=max_M, fit_type=fit_type, add_cap=add_cap
             )
     except Exception as exc:
+        # Intentionally broad: any library failure is reported via
+        # KKResult.error rather than aborting the series.
         error = f"{type(exc).__name__}: {exc}"
         warnings.warn(
             f"Lin-KK test raised {error}; reporting this spectrum as a KK fail "
@@ -205,12 +189,8 @@ def kramers_kronig(
         return _failed_result(error)
 
     pooled = np.concatenate([np.abs(resid_real), np.abs(resid_imag)])
-    if pooled.size == 0:
-        max_resid = float("nan")
-        rms_resid = float("nan")
-    else:
-        max_resid = float(np.max(pooled))
-        rms_resid = float(np.sqrt(np.mean(pooled**2)))
+    max_resid = float(np.max(pooled))
+    rms_resid = float(np.sqrt(np.mean(pooled**2)))
 
     return KKResult(
         freq=np.asarray(spec.freq, dtype=float),

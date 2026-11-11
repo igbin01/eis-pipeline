@@ -280,7 +280,7 @@ def save_bode_plots(series, fits, out_dir: Path) -> list[Path]:
     from eispipe.plots import bode
 
     paths = []
-    for spec, res in zip(series, fits):
+    for spec, res in zip(series, fits, strict=True):
         ax_mag, _ = bode(spec, fit=res)
         ax_mag.set_title(f"Policastro 2023 Fig 5c,d, t = {spec.immersion_time_h:g} h")
         path = out_dir / f"bode_t{spec.immersion_time_h:g}h.png"

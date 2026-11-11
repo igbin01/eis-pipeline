@@ -20,8 +20,8 @@ Two deliberate defaults:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Callable, Iterator
 
 import numpy as np
 import pandas as pd
@@ -187,7 +187,7 @@ class FitSeries:
         return np.array([r.immersion_time_h for r in self._results], dtype=float)
 
     @property
-    def successful(self) -> "FitSeries":
+    def successful(self) -> FitSeries:
         return FitSeries([r for r in self._results if r.success])
 
     def to_frame(self) -> pd.DataFrame:
@@ -259,7 +259,10 @@ def fit_spectrum(
             weight_by_modulus=(weighting == "modulus"),
             x_scale=x_scale,
         )
-    except Exception as exc:  # bad guess length / optimiser / linear-algebra failure
+    except Exception as exc:
+        # Intentionally broad: impedance.py / scipy can fail in many ways (bad
+        # guess length, optimiser, linear algebra); all become the documented
+        # RuntimeError.
         raise RuntimeError(f"{cm.name} fit failed: {exc}") from exc
 
     values = np.asarray(cc.parameters_, dtype=float)
@@ -274,7 +277,7 @@ def fit_spectrum(
         model_name=cm.name,
         circuit=cm.circuit,
         params=cm.named_params(values),
-        param_errors=dict(zip(cm.param_names, (float(x) for x in confs))),
+        param_errors=dict(zip(cm.param_names, (float(x) for x in confs), strict=True)),
         freq=np.asarray(spec.freq, dtype=float),
         Z_data=np.asarray(spec.Z, dtype=complex),
         Z_fit=np.asarray(Z_fit, dtype=complex),
@@ -345,6 +348,8 @@ def fit_series(
                 x_scale=x_scale,
             )
         except Exception as exc:
+            # Intentionally broad: any per-spectrum failure becomes a failed
+            # FitResult so the rest of the series is still fitted.
             message = f"{type(exc).__name__}: {exc}"
             _log.warning(
                 "%s fit failed at immersion_time_h=%s: %s",

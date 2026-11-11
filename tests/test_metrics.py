@@ -10,7 +10,6 @@ from conftest import synth_degraded
 from eispipe.fit import FitResult, FitSeries, fit_series
 from eispipe.metrics import (
     breakpoint_frequency,
-    breakpoint_frequency_measured,
     coating_capacitance,
     cpe_to_capacitance,
     double_layer_capacitance,
@@ -20,7 +19,6 @@ from eispipe.metrics import (
     water_uptake_series,
 )
 from eispipe.spectrum import Spectrum, SpectrumSeries
-
 
 # --------------------------------------------------------------------------
 # cpe_to_capacitance (Hsu-Mansfeld)
@@ -244,7 +242,6 @@ def test_metrics_table_without_area_omits_normalised_columns():
 
 def _manual_fit(params, t=0.0, *, model="intact_coating", area_cm2=None):
     from eispipe.models import get_model
-
     from helpers import synth_coating
 
     freq, Z = synth_coating()

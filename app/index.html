@@ -755,10 +755,6 @@
       return;
     }
 
-    if (!manifestFile && files.length === 1) {
-      // single CSV route, keep backend shape flexible
-    }
-
     if (manifestFile && files.length === 0) {
       addLog("manifest selected without spectra files");
       return;

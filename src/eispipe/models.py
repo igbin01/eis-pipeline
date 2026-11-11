@@ -23,8 +23,8 @@ Models
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 
@@ -235,7 +235,7 @@ class CircuitModel:
         values = list(values)
         if len(values) != self.n_params:
             raise ValueError(f"expected {self.n_params} values, got {len(values)}")
-        return dict(zip(self.param_names, (float(v) for v in values)))
+        return dict(zip(self.param_names, (float(v) for v in values), strict=True))
 
 
 # ---------------------------------------------------------------------------

@@ -342,7 +342,8 @@ def ml_feature_table(fits: FitSeries) -> pd.DataFrame:
             # fit as the reference for the water-uptake curve. Keep this pure.
             c0 = coating_capacitance(fits.successful[0])
             water_up = float(np.log10(cc / c0) / np.log10(EPSILON_WATER))
-        except Exception:
+        except (ValueError, KeyError, ArithmeticError):
+            # unconvertible CPE, missing params, or c0 underflowing to 0.0
             water_up = np.nan
 
         rows.append(

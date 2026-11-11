@@ -86,7 +86,10 @@ def _files_outside_job_dirs(root: Path, base: Path) -> list[Path]:
 def _csv_bytes(n: int = 30) -> bytes:
     freq, Z = synth_coating(n=n)
     lines = ["freq,Zreal,Zimag"]
-    lines += [f"{float(f)!r},{float(z.real)!r},{float(z.imag)!r}" for f, z in zip(freq, Z)]
+    lines += [
+        f"{float(f)!r},{float(z.real)!r},{float(z.imag)!r}"
+        for f, z in zip(freq, Z, strict=True)
+    ]
     return ("\n".join(lines) + "\n").encode()
 
 

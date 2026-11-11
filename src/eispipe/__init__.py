@@ -21,30 +21,30 @@ The ``plots`` module is imported explicitly (``from eispipe import plots``) so
 that importing the package does not pull in matplotlib.
 """
 
-from .spectrum import Spectrum, SpectrumSeries
+from .fit import FitResult, FitSeries, fit_series, fit_spectrum
 from .io import (
+    crop_frequencies,
+    drop_inductive,
     load_csv,
     load_instrument,
     load_manifest,
     load_series,
     load_series_by_pattern,
-    crop_frequencies,
-    drop_inductive,
 )
-from .validate import KKResult, kramers_kronig, validate_series
-from .models import CircuitModel, MODELS, get_model
-from .fit import FitResult, FitSeries, fit_spectrum, fit_series
 from .metrics import (
-    cpe_to_capacitance,
-    coating_capacitance,
-    double_layer_capacitance,
     breakpoint_frequency,
     breakpoint_frequency_measured,
-    water_uptake,
-    water_uptake_series,
+    coating_capacitance,
+    cpe_to_capacitance,
+    double_layer_capacitance,
     metrics_table,
     ml_feature_table,
+    water_uptake,
+    water_uptake_series,
 )
+from .models import MODELS, CircuitModel, get_model
+from .spectrum import Spectrum, SpectrumSeries
+from .validate import KKResult, kramers_kronig, validate_series
 
 __version__ = "0.1.0"
 
