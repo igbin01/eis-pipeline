@@ -143,3 +143,16 @@ def test_series_indexing_and_frame():
     df = series.to_frame()
     assert len(df) == 3 * 8
     assert sorted(df["immersion_time_h"].unique()) == [0, 24, 168]
+
+
+# ---------------------------------------------------------------------------
+# B8: metadata numbers must be finite (NaN slipped past the range checks)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["immersion_time_h", "area_cm2", "temperature_C"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "nan", "inf"])
+def test_metadata_must_be_finite(field, value):
+    freq, Z = synth_coating(n=10)
+    with pytest.raises(ValueError, match=f"{field} must be finite"):
+        Spectrum(freq, Z, **{field: value})

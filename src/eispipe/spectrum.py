@@ -22,6 +22,7 @@ direction; the constructor reorders the data if given ascending input.
 
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass, replace
 from typing import Iterable, Iterator
@@ -104,16 +105,17 @@ class Spectrum:
             self.freq = self.freq[order]
             self.Z = self.Z[order]
 
-        if self.immersion_time_h is not None:
-            self.immersion_time_h = float(self.immersion_time_h)
-            if self.immersion_time_h < 0:
-                raise ValueError("immersion_time_h must be >= 0")
-        if self.area_cm2 is not None:
-            self.area_cm2 = float(self.area_cm2)
-            if self.area_cm2 <= 0:
-                raise ValueError("area_cm2 must be > 0")
-        if self.temperature_C is not None:
-            self.temperature_C = float(self.temperature_C)
+        for name in ("immersion_time_h", "area_cm2", "temperature_C"):
+            value = getattr(self, name)
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(f"{name} must be finite, got {value}")
+                setattr(self, name, value)
+        if self.immersion_time_h is not None and self.immersion_time_h < 0:
+            raise ValueError("immersion_time_h must be >= 0")
+        if self.area_cm2 is not None and self.area_cm2 <= 0:
+            raise ValueError("area_cm2 must be > 0")
 
     # -- size / derived quantities ------------------------------------------
 
