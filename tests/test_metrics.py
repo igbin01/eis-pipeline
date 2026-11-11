@@ -235,3 +235,95 @@ def test_metrics_table_without_area_omits_normalised_columns():
     df = metrics_table(fits)
     assert "R_po_ohm_cm2" not in df.columns
     assert "C_c" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# C1: f_break is the -Z'' apex of R_po||CPE, where the phase is -45*n deg
+# ---------------------------------------------------------------------------
+
+
+def _manual_fit(params, t=0.0, *, model="intact_coating", area_cm2=None):
+    from eispipe.models import get_model
+
+    from helpers import synth_coating
+
+    freq, Z = synth_coating()
+    return FitResult(
+        model_name=model,
+        circuit=get_model(model).circuit,
+        params=dict(params),
+        param_errors={k: np.nan for k in params},
+        freq=freq,
+        Z_data=Z,
+        Z_fit=Z,
+        rmse=0.0,
+        chi2_norm=0.0,
+        weighting="modulus",
+        success=True,
+        immersion_time_h=t,
+        area_cm2=area_cm2,
+    )
+
+
+@pytest.mark.parametrize("n", [1.0, 0.9, 0.8])
+def test_breakpoint_frequency_is_minus_zimag_apex_with_phase_minus45n(n):
+    R, Q = 1e7, 1e-9
+    fit = _manual_fit({"R_e": 10.0, "R_po": R, "Q_c": Q, "n_c": n})
+
+    fb = breakpoint_frequency(fit)
+
+    f = np.logspace(-4, 6, 200_001)
+    Z = R / (1 + R * Q * (1j * 2 * np.pi * f) ** n)
+    f_apex = f[np.argmax(-Z.imag)]
+    assert fb == pytest.approx(f_apex, rel=0.01)
+
+    Zb = R / (1 + R * Q * (1j * 2 * np.pi * fb) ** n)
+    assert np.degrees(np.angle(Zb)) == pytest.approx(-45.0 * n, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# C13: a degenerate (zero-bound) row gets NaN metrics instead of aborting
+# ---------------------------------------------------------------------------
+
+GOOD_INTACT = {"R_e": 50.0, "R_po": 8_000.0, "Q_c": 2e-7, "n_c": 0.9}
+
+
+def test_metrics_table_keeps_rows_whose_cpe_params_hit_zero_bound():
+    fits = FitSeries(
+        [
+            _manual_fit(GOOD_INTACT, 0.0, area_cm2=10.0),
+            _manual_fit({**GOOD_INTACT, "Q_c": 0.0}, 24.0, area_cm2=10.0),
+            _manual_fit({**GOOD_INTACT, "n_c": 0.0}, 48.0, area_cm2=10.0),
+            _manual_fit(GOOD_INTACT, 72.0, area_cm2=10.0),
+        ]
+    )
+
+    with pytest.warns(UserWarning, match="could not derive"):
+        df = metrics_table(fits)
+
+    assert list(df["immersion_time_h"]) == [0.0, 24.0, 48.0, 72.0]
+    assert list(df["success"]) == [True, True, True, True]
+    bad = df[df["immersion_time_h"].isin([24.0, 48.0])]
+    good = df[df["immersion_time_h"].isin([0.0, 72.0])]
+    for col in ("C_c", "f_break", "water_uptake_vol_frac", "C_c_F_per_cm2"):
+        assert bad[col].isna().all(), col
+        assert np.isfinite(good[col]).all(), col
+    # raw fitted parameters are still reported for the degenerate rows
+    assert list(bad["R_po"]) == [8_000.0, 8_000.0]
+    assert list(bad["R_po_ohm_cm2"]) == [80_000.0, 80_000.0]
+
+
+def test_metrics_table_zero_Q_dl_only_blanks_C_dl():
+    params = {
+        "R_e": 40.0, "Q_c": 2e-7, "n_c": 0.93, "R_po": 8_000.0,
+        "Q_dl": 0.0, "n_dl": 0.82, "R_ct": 2e6,
+    }
+    fits = FitSeries([_manual_fit(params, 0.0, model="degraded_coating")])
+
+    with pytest.warns(UserWarning, match="could not derive"):
+        df = metrics_table(fits)
+
+    row = df.iloc[0]
+    assert np.isnan(row["C_dl"])
+    assert row["R_ct"] == 2e6
+    assert np.isfinite(row["C_c"]) and np.isfinite(row["f_break"])

@@ -149,16 +149,20 @@ def double_layer_capacitance(fit: FitResult, *, per_area: bool = False) -> float
 def breakpoint_frequency(fit: FitResult) -> float:
     r"""Coating breakpoint frequency :math:`f_b = 1 / (2\pi R_{po} C_c)`.
 
-    The frequency where the coating loop's phase passes -45 deg. It scales with
-    the delaminated / ionically-conducting area fraction, so a rising
-    :math:`f_b` over immersion time tracks disbondment.
+    With ``C_c`` from the Hsu-Mansfeld closed form, :math:`R_{po} C_c =
+    (R_{po} Q_c)^{1/n_c}`, so :math:`f_b = \omega_{max} / 2\pi`: the
+    frequency of maximum :math:`-Z''` of the ``R_po \| CPE`` loop (the apex
+    of its Nyquist arc). The loop's phase there is :math:`-45 n_c` deg, so
+    :math:`f_b` equals the -45 deg crossing only when ``n_c = 1``; the phase
+    of a plain ``R \| CPE`` loop is monotonic and has no peak.
 
-    This is computed from the fitted ``R_po`` and ``C_c = f(Q_c, n_c, R_po)``,
-    so it equals the phase-peak frequency of an ideal ``R_po \| CPE`` loop *by
-    construction* -- it is not an independent measurement, only a
-    re-expression of ``Q_c``, ``n_c``, and ``R_po``. For a value derived
-    directly from the measured phase, independent of any fit, see
-    :func:`breakpoint_frequency_measured`.
+    :math:`f_b` scales with the delaminated / ionically-conducting area
+    fraction, so a rising :math:`f_b` over immersion time tracks disbondment.
+
+    This is a re-expression of the fitted ``Q_c``, ``n_c`` and ``R_po``, not
+    an independent measurement. For the -45 deg crossing of the measured
+    phase, independent of any fit, see :func:`breakpoint_frequency_measured`
+    -- the two differ systematically when ``n_c < 1``.
     """
     _require_fit(fit)
     Cc = coating_capacitance(fit)
@@ -359,12 +363,20 @@ def metrics_table(
     One row per fit. Always: ``sample_id, immersion_time_h, model, success,
     kk_passed, rmse, R_e, R_po, C_c, f_break, f_break_measured,
     water_uptake_vol_frac, reference_time_h``. ``f_break_measured`` is the
-    fit-independent phase-crossing breakpoint frequency (see
-    :func:`breakpoint_frequency_measured`); ``reference_time_h`` records which
-    immersion time's capacitance was used as the water-uptake reference
-    ``C_0`` (NaN if no reference was resolvable). When the fit exposes a
-    substrate loop: ``R_ct, C_dl``. When ``area_cm2`` is set:
+    fit-independent -45 deg phase-crossing frequency (see
+    :func:`breakpoint_frequency_measured`); ``f_break`` is the -Z'' apex of
+    the fitted ``R_po || CPE`` loop (see :func:`breakpoint_frequency`), so
+    the two differ systematically when ``n_c < 1``. ``reference_time_h``
+    records which immersion time's capacitance was used as the water-uptake
+    reference ``C_0`` (NaN if no reference was resolvable). When the fit
+    exposes a substrate loop: ``R_ct, C_dl``. When ``area_cm2`` is set:
     ``R_po_ohm_cm2, C_c_F_per_cm2``.
+
+    A successful fit whose CPE parameters cannot be converted (e.g. ``Q`` or
+    ``n`` at the 0 bound) keeps its row: the fitted parameters are reported,
+    the derived columns (``C_c``, ``f_break``, ``water_uptake_vol_frac``,
+    ``C_c_F_per_cm2``; or ``C_dl`` for the substrate loop) are NaN, and a
+    ``UserWarning`` names the row.
     """
     try:
         c0, ref_time_h = _reference_capacitance(fits, reference)
@@ -389,13 +401,21 @@ def metrics_table(
             row["f_break_measured"] = np.nan
         if r.success:
             p = r.params
-            cc = coating_capacitance(r)
+            try:
+                cc = coating_capacitance(r)
+                f_break = breakpoint_frequency(r)
+            except ValueError as exc:
+                warnings.warn(
+                    f"could not derive C_c / f_break at t={r.immersion_time_h} h: {exc}",
+                    stacklevel=2,
+                )
+                cc = f_break = np.nan
             row.update(
                 {
                     "R_e": p.get("R_e"),
                     "R_po": p["R_po"],
                     "C_c": cc,
-                    "f_break": breakpoint_frequency(r),
+                    "f_break": f_break,
                     "water_uptake_vol_frac": (
                         float(np.log10(cc / c0) / np.log10(epsilon_water))
                         if np.isfinite(c0)
@@ -403,7 +423,14 @@ def metrics_table(
                     ),
                 }
             )
-            cdl = double_layer_capacitance(r)
+            try:
+                cdl = double_layer_capacitance(r)
+            except ValueError as exc:
+                warnings.warn(
+                    f"could not derive C_dl at t={r.immersion_time_h} h: {exc}",
+                    stacklevel=2,
+                )
+                cdl = np.nan
             if cdl is not None:
                 row["R_ct"] = p["R_ct"]
                 row["C_dl"] = cdl
