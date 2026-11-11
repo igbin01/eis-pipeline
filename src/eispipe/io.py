@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -251,8 +251,9 @@ def load_instrument(
     ``impedance.py``'s plain CSV reader (headerless ``freq, Z', Z''``
     columns). Any other extension without ``instrument`` raises
     ``ValueError``. BioLogic's binary ``.mpr`` format is unsupported
-    (``impedance.py`` reads only the ``.mpt`` text export); export to
-    ``.mpt`` from EC-Lab first.
+    (``impedance.py`` reads only the ``.mpt`` text export) and raises
+    ``ValueError`` even when ``instrument`` is given; export to ``.mpt`` from
+    EC-Lab first.
 
     ``impedance.py``'s readers are trusted to return impedance in the internal
     capacitive-is-negative convention. Set ``negate_imaginary=True`` if a
@@ -263,17 +264,22 @@ def load_instrument(
     path = Path(path)
     meta = _split_meta(metadata)
 
+    if path.suffix.lower() == ".mpr":
+        reason = (
+            "cannot infer instrument from extension '.mpr'"
+            if instrument is None
+            else f"instrument={instrument!r} cannot read '.mpr'"
+        )
+        raise ValueError(
+            f"{reason}; .mpr is BioLogic's binary format; "
+            f"export to .mpt (text) from EC-Lab first"
+        )
     if instrument is None:
         instrument = _INSTRUMENT_BY_EXT.get(path.suffix.lower())
     if instrument is None and path.suffix.lower() not in {".csv", ".txt"}:
-        hint = (
-            " (.mpr is BioLogic's binary format; export to .mpt (text) from EC-Lab first)"
-            if path.suffix.lower() == ".mpr"
-            else ""
-        )
         raise ValueError(
             f"cannot infer instrument from extension {path.suffix!r}; "
-            f"pass instrument= explicitly{hint}"
+            f"pass instrument= explicitly"
         )
 
     freq, Z = readFile(str(path), instrument=instrument)

@@ -414,3 +414,13 @@ def test_load_instrument_mpr_is_unsupported_and_points_to_mpt(tmp_path):
 
     assert "cannot infer instrument" in str(excinfo.value)
     assert "binary" in str(excinfo.value)
+
+
+def test_load_instrument_mpr_rejected_even_with_explicit_instrument(tmp_path):
+    p = tmp_path / "run.mpr"
+    p.write_bytes(b"BIO-LOGIC MODULAR FILE\x1a\x00\x01\x02\xff\xfe")
+
+    with pytest.raises(ValueError, match=r"\.mpt") as excinfo:
+        load_instrument(p, instrument="biologic")
+
+    assert "binary" in str(excinfo.value)
