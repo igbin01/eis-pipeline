@@ -10,7 +10,8 @@ per time unit over 10 time units, Gaussian noise of SD 0.02 (AR(1) where a
 `rho` is given, with the same overall SD), and a 95% target unless stated.
 They are simulation results, not guarantees for real data. Sources named
 for rejected methods are given for orientation only and have not been
-checked against the originals.
+checked against the originals; the sources the adopted code relies on, and
+their verification status, are in `docs/literature_ledger.md`.
 
 ## Forecast interval (`time_to_threshold`), independent noise
 
