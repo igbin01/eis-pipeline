@@ -29,6 +29,9 @@ filterwarnings = [
     # impedance.py's informational notice when predicting from initial parameters
     "ignore:Simulating circuit based on initial parameters:UserWarning:impedance",
 ]
+markers = [
+    "slow: simulation-heavy statistical tests; skip with -m \"not slow\"",
+]
 
 [tool.ruff]
 target-version = "py312"

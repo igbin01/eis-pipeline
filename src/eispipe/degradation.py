@@ -16,14 +16,21 @@ Assumptions shared by all functions (in plain language):
 
 * Readings are independent: the scatter of one reading around the trend does
   not depend on the scatter of the previous one. Slowly wandering errors
-  (autocorrelation) make every interval here too narrow.
+  (autocorrelation) make every interval here too narrow: in
+  ``scripts/validate_degradation.py``, with noise correlated from reading to
+  reading (AR(1)) at the same overall size, the 95% intervals covered the
+  truth in only about 77-79% of runs at rho 0.5 and 51-53% at rho 0.8. All
+  coverage figures quoted in this module assume independent noise and a
+  straight-line trend.
 * Over the stretch of data used, the underlying change is a straight line
   (or, for :func:`detect_rate_change`, two straight lines joined at one point).
 * Forecasts assume the current trend simply continues; they cannot anticipate
   a process change that has not happened yet.
 
-TODO verify against ASTM G16 and Sen (1968): the Theil-Sen rate and its
-confidence interval, and the use of a linear rate for corrosion data.
+TODO verify against ASTM G16 and Sen (1968): the Theil-Sen slope and its
+confidence interval, and the use of a linear rate for corrosion data. The
+intercept is not taken from Sen (1968); it follows SciPy's documented
+``method="joint"`` option of ``theilslopes``.
 """
 
 from __future__ import annotations
@@ -239,11 +246,20 @@ def estimate_rate(times, values, window=None, *, level=0.95) -> RateEstimate:
     move it, unlike an ordinary least-squares slope. The interval at ``level``
     (default 95%) is the distribution-free one SciPy computes from the ranks of
     those pairwise slopes. The intercept is the median of
-    ``value - rate * time`` over all readings.
+    ``value - rate * time`` over all readings; this follows SciPy's documented
+    ``method="joint"`` option, not Sen (1968).
 
     ``window`` (same units as ``times``) restricts the fit to readings taken
     within that span before the last one, e.g. the last 90 days. With fewer
     than :data:`MIN_POINTS` readings the rate and interval are NaN.
+
+    How often the 95% interval contains the true rate
+    (``scripts/validate_degradation.py``, 60 readings): 95.9% of 1000 runs
+    with independent noise and 5% outliers. That figure assumes independent
+    noise and a straight-line trend. With noise correlated from reading to
+    reading (AR(1), same overall size, no outliers) it fell to 76.5% at
+    rho 0.5 and 52.5% at rho 0.8 (94.9% for independent noise in the same
+    setup) -- the interval is then far too narrow.
 
     Assumptions: the change is a straight line over the readings used; the
     scatter around it is independent from reading to reading and does not
@@ -251,7 +267,7 @@ def estimate_rate(times, values, window=None, *, level=0.95) -> RateEstimate:
     :func:`detect_rate_change`), use ``window`` or pass only the readings after
     the change.
 
-    TODO verify against ASTM G16 and Sen (1968).
+    TODO verify against ASTM G16 and Sen (1968): the slope and its interval.
     """
     _check_level(level)
     t, y = _series(times, values)
@@ -458,7 +474,8 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
 
     Two small corrections keep the interval honest: the residuals are scaled
     up by sqrt(n / (n - 2)) because fitting the line made them slightly
-    smaller than the real scatter, and each resampled residual gets a little
+    smaller than the real scatter (TODO verify against Davison and Hinkley
+    (1997) for this rescaling), and each resampled residual gets a little
     jitter (half a robust standard deviation, rescaled so the overall spread
     is unchanged) so that repeated residuals do not pile the Theil-Sen slopes
     up at the original value. In ``scripts/validate_degradation.py`` (5%
@@ -466,6 +483,14 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
     time in 94.4%, 94.6% and 95.4% of runs with 20, 40 and 60 readings; an
     earlier check on other seeds gave 92.6% with 20 readings, so treat short
     series as slightly optimistic.
+
+    Those figures assume independent noise and a straight-line trend. With
+    noise correlated from reading to reading (AR(1), same overall size, no
+    outliers, 60 readings) the 95% interval contained the true crossing time
+    in only 78.6% of runs at rho 0.5 and 50.6% at rho 0.8 (94.0% for
+    independent noise in the same setup). Resampling residuals one by one
+    treats each reading as independent, so with correlated noise the forecast
+    looks more certain than it is.
 
     No number is given -- ``time_to_cross`` is ``None`` and ``reason`` says
     why -- when there are too few readings, the rate is not significantly
@@ -515,6 +540,7 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
     fitted = rate.intercept + rate.rate * t
     # Fitted residuals are slightly smaller than the real errors (two line
     # parameters were fitted to the same data): scale them back up.
+    # TODO verify against Davison and Hinkley (1997).
     resid = (y - fitted) * math.sqrt(n / (n - 2))
     rng = np.random.default_rng(seed)
     draws = resid[rng.integers(0, n, size=(int(n_boot), n))]

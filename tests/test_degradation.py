@@ -36,6 +36,7 @@ def test_estimate_rate_exact_on_noise_free_line():
     assert (est.n, est.level, est.significant) == (21, 0.95, True)
 
 
+@pytest.mark.slow
 def test_estimate_rate_95_interval_covers_true_rate_in_90_to_99_percent():
     covered = 0
     for seed in range(200):
@@ -187,6 +188,7 @@ def test_time_to_threshold_falling_series_towards_a_lower_limit():
     assert fc.time_to_cross == pytest.approx(6.0, abs=1e-9)
 
 
+@pytest.mark.slow
 def test_forecast_95_interval_coverage_is_close_to_nominal():
     # two-sided on purpose: a conservative interval (~99%) fails as well as a
     # too-narrow one
@@ -429,22 +431,26 @@ def _power(noise, ratio, outlier_fraction, screen=False, seeds=range(200)):
     return found / len(seeds)
 
 
+@pytest.mark.slow
 def test_power_floor_clearest_case_without_outliers():
     # noise 0.01, rate drops to a quarter: must essentially always be found
     assert _power(noise=0.01, ratio=0.25, outlier_fraction=0.0) >= 0.98
 
 
+@pytest.mark.slow
 def test_power_floor_clearest_case_with_outliers():
     assert _power(noise=0.01, ratio=0.25, outlier_fraction=0.05) >= 0.95
     assert _power(noise=0.01, ratio=0.25, outlier_fraction=0.05, screen=True) >= 0.98
 
 
+@pytest.mark.slow
 def test_screening_restores_power_under_outliers():
     # rate halves, moderate noise, 5% outliers: plain least squares loses the
     # change in many runs; screening finds it again
     assert _power(noise=0.02, ratio=0.5, outlier_fraction=0.05, screen=True) >= 0.95
 
 
+@pytest.mark.slow
 def test_screening_does_not_invent_changes_on_straight_data_with_outliers():
     invented = sum(
         detect_rate_change(s.times, s.values, min_segment=5, screen_outliers=True) is not None

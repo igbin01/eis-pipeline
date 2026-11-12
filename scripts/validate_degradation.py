@@ -14,6 +14,8 @@ Sections:
   4. 95% forecast-interval coverage (time_to_threshold) for 20, 40, 60 readings
   5. power: how often a real change is found, by noise, effect size and outliers
   6. how false alarms and power vary with the BIC threshold (2, 6, 10, 15)
+  7. rate- and forecast-interval coverage when the noise is correlated over
+     time (AR(1), rho 0.5 and 0.8), next to independent noise
 """
 
 from __future__ import annotations
@@ -129,6 +131,38 @@ def threshold_sweep(runs: int) -> list[tuple[float, int, int, float, float]]:
     return rows
 
 
+def correlated_series(rho: float, seed: int, n: int = 60, noise: float = 0.02):
+    """Straight line (rate 0.1) plus AR(1) noise with total standard deviation ``noise``.
+
+    Each reading's error is ``rho`` times the previous one plus fresh noise;
+    the fresh part is scaled by sqrt(1 - rho**2) so the overall spread stays
+    ``noise`` whatever ``rho`` is. ``rho = 0`` is independent noise. No outliers.
+    """
+    line = simulate_series("constant", n=n, rate=0.1, noise=0.0, outlier_fraction=0.0)
+    rng = np.random.default_rng(seed)
+    errors = np.empty(n)
+    errors[0] = rng.normal(0.0, noise)
+    fresh = noise * np.sqrt(1.0 - rho**2)
+    for i in range(1, n):
+        errors[i] = rho * errors[i - 1] + rng.normal(0.0, fresh)
+    return line.times, line.values + errors
+
+
+def correlated_coverage(rho: float, runs_rate: int, runs_forecast: int) -> tuple[float, float]:
+    rate_hits = 0
+    for k in range(runs_rate):
+        t, y = correlated_series(rho, seed=17_000 + k)
+        est = estimate_rate(t, y)
+        rate_hits += est.low <= 0.1 <= est.high
+    fc_hits = 0
+    for k in range(runs_forecast):
+        t, y = correlated_series(rho, seed=18_000 + k)
+        true_time = 1.5 / 0.1 - t[-1]
+        fc = time_to_threshold(t, y, threshold=1.5, horizon=50.0, n_boot=500, seed=18_000 + k)
+        fc_hits += fc.ok and fc.low <= true_time <= fc.high
+    return rate_hits / runs_rate, fc_hits / runs_forecast
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true", help="5x fewer runs")
@@ -172,12 +206,24 @@ def main(argv=None) -> int:
     print("   (ratio = rate after / rate before; 0.25 is the clearest change, 0.75 the subtlest)\n")
 
     print(f"6. BIC threshold (min_bic_drop), screening off, {n_sw} runs each")
-    print(f"   {'threshold':>9} | {'false alarms':>13} {'false alarms':>13} | {'power':>8} {'power':>8}")
-    print(f"   {'':>9} | {'0% outliers':>13} {'5% outliers':>13} | {'n.02 r.75':>8} {'n.05 r.5':>8}")
+    print(f"   {'threshold':>9} | {'false alarms':>13} {'false alarms':>13} | "
+          f"{'power, 0% outliers':>19}")
+    print(f"   {'':>9} | {'0% outliers':>13} {'5% outliers':>13} | {'n.02 r.75':>9} {'n.05 r.5':>9}")
     for thr, fa0, fa5, p_mod, p_hard in threshold_sweep(n_sw):
         mark = "  <- default" if thr == 10.0 else ""
         print(f"   {thr:>9g} | {f'{fa0}/{n_sw}':>13} {f'{fa5}/{n_sw}':>13} | "
-              f"{pct(p_mod):>8} {pct(p_hard):>8}{mark}")
+              f"{pct(p_mod):>9} {pct(p_hard):>9}{mark}")
+    print("   (power columns: change at t = 5 with no outliers; n = noise, r = rate after / before)\n")
+
+    n_cr, n_cf = 1000 // scale, 500 // scale
+    print("7. Correlated noise: AR(1) from reading to reading, total noise SD 0.02, no outliers,")
+    print(f"   60 readings; rate interval {n_cr} runs, forecast interval {n_cf} runs per row")
+    print(f"   {'noise':>24} | {'rate 95% interval':>18} {'forecast 95% interval':>22}")
+    for rho, label in ((0.0, "independent (rho 0)"), (0.5, "correlated, rho 0.5"),
+                       (0.8, "correlated, rho 0.8")):
+        rate_cov, fc_cov = correlated_coverage(rho, n_cr, n_cf)
+        print(f"   {label:>24} | {pct(rate_cov):>18} {pct(fc_cov):>22}")
+    print("   (both intervals assume independent noise; correlated noise makes them too narrow)")
 
     print(f"\n(done in {time.monotonic() - start:.0f} s)")
     return 0
