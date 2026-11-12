@@ -16,11 +16,25 @@ Public API (stable):
     breakpoint_frequency_measured,
     water_uptake, water_uptake_series, metrics_table,
     ml_feature_table                                  -- metrics (see ``metrics``)
+    estimate_rate, detect_rate_change, time_to_threshold,
+    simulate_series, describe_trend, RateEstimate, RateChange,
+    ThresholdForecast, SimulatedSeries   -- drift rates and forecasts (see ``degradation``)
 
 The ``plots`` module is imported explicitly (``from eispipe import plots``) so
 that importing the package does not pull in matplotlib.
 """
 
+from .degradation import (
+    RateChange,
+    RateEstimate,
+    SimulatedSeries,
+    ThresholdForecast,
+    describe_trend,
+    detect_rate_change,
+    estimate_rate,
+    simulate_series,
+    time_to_threshold,
+)
 from .fit import FitResult, FitSeries, fit_series, fit_spectrum
 from .io import (
     crop_frequencies,
@@ -77,5 +91,14 @@ __all__ = [
     "water_uptake_series",
     "metrics_table",
     "ml_feature_table",
+    "estimate_rate",
+    "detect_rate_change",
+    "time_to_threshold",
+    "simulate_series",
+    "describe_trend",
+    "RateEstimate",
+    "RateChange",
+    "ThresholdForecast",
+    "SimulatedSeries",
     "__version__",
 ]

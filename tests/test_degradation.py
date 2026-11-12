@@ -97,9 +97,24 @@ def test_vectorised_theil_sen_matches_scipy():
     slopes, intercepts = _theil_sen(t, Y)
 
     for row, slope, intercept in zip(Y, slopes, intercepts, strict=True):
-        ref = stats.theilslopes(row, t, method="separate")
+        ref = stats.theilslopes(row, t, method="joint")
         assert slope == pytest.approx(ref.slope, abs=1e-12)
         assert intercept == pytest.approx(ref.intercept, abs=1e-12)
+
+
+def test_estimate_rate_intercept_uses_all_points():
+    # the "joint" intercept, median(y - rate * t), rather than one built from
+    # median(y) alone, which hinges on the one or two middle readings
+    rng = np.random.default_rng(3)
+    t = np.linspace(0.0, 10.0, 30)
+    y = 0.4 + 0.1 * t + rng.normal(0, 0.05, t.size)
+
+    est = estimate_rate(t, y)
+
+    joint = stats.theilslopes(y, t, method="joint").intercept
+    separate = stats.theilslopes(y, t, method="separate").intercept
+    assert joint != pytest.approx(separate, abs=1e-9)
+    assert est.intercept == pytest.approx(joint, abs=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +187,10 @@ def test_time_to_threshold_falling_series_towards_a_lower_limit():
     assert fc.time_to_cross == pytest.approx(6.0, abs=1e-9)
 
 
-def test_forecast_interval_contains_true_crossing_in_most_simulations():
-    hits, n_sims = 0, 100
+def test_forecast_95_interval_coverage_is_close_to_nominal():
+    # two-sided on purpose: a conservative interval (~99%) fails as well as a
+    # too-narrow one
+    hits, n_sims = 0, 400
     for seed in range(n_sims):
         s = simulate_series("constant", n=40, rate=0.1, seed=seed)
         true_time_to_cross = (1.5 - s.truth["start_value"]) / s.truth["rate"] - s.times[-1]
@@ -184,7 +201,7 @@ def test_forecast_interval_contains_true_crossing_in_most_simulations():
         assert fc.ok, (seed, fc.reason)
         hits += fc.low <= true_time_to_cross <= fc.high
 
-    assert hits / n_sims >= 0.85
+    assert 0.90 <= hits / n_sims <= 0.98
 
 
 def test_non_significant_trend_returns_none_with_reason():
@@ -392,3 +409,82 @@ def test_invalid_arguments_raise(call, match):
 
 def test_min_points_is_three():
     assert MIN_POINTS == 3
+
+
+# ---------------------------------------------------------------------------
+# change detection: power, and optional outlier screening
+# ---------------------------------------------------------------------------
+
+
+def _power(noise, ratio, outlier_fraction, screen=False, seeds=range(200)):
+    """Share of runs where a halving-style rate change at mid-series is found
+    (reported within 1 time unit of the truth)."""
+    found = 0
+    for seed in seeds:
+        s = simulate_series("step", n=60, duration=10.0, rate=0.1, rate_after=0.1 * ratio,
+                            change_time=5.0, noise=noise, outlier_fraction=outlier_fraction,
+                            seed=seed)
+        change = detect_rate_change(s.times, s.values, min_segment=5, screen_outliers=screen)
+        found += change is not None and abs(change.time - 5.0) <= 1.0
+    return found / len(seeds)
+
+
+def test_power_floor_clearest_case_without_outliers():
+    # noise 0.01, rate drops to a quarter: must essentially always be found
+    assert _power(noise=0.01, ratio=0.25, outlier_fraction=0.0) >= 0.98
+
+
+def test_power_floor_clearest_case_with_outliers():
+    assert _power(noise=0.01, ratio=0.25, outlier_fraction=0.05) >= 0.95
+    assert _power(noise=0.01, ratio=0.25, outlier_fraction=0.05, screen=True) >= 0.98
+
+
+def test_screening_restores_power_under_outliers():
+    # rate halves, moderate noise, 5% outliers: plain least squares loses the
+    # change in many runs; screening finds it again
+    assert _power(noise=0.02, ratio=0.5, outlier_fraction=0.05, screen=True) >= 0.95
+
+
+def test_screening_does_not_invent_changes_on_straight_data_with_outliers():
+    invented = sum(
+        detect_rate_change(s.times, s.values, min_segment=5, screen_outliers=True) is not None
+        for s in (simulate_series("constant", seed=seed) for seed in range(200))
+    )
+    assert invented <= 2
+
+
+def test_screening_is_off_by_default_and_reports_what_it_dropped():
+    import inspect
+
+    assert inspect.signature(detect_rate_change).parameters["screen_outliers"].default is False
+
+    clean = simulate_series("step", noise=0.0, outlier_fraction=0.0, n=61, change_time=6.0)
+    screened = detect_rate_change(clean.times, clean.values, min_segment=5, screen_outliers=True)
+    assert screened.n_screened == 0
+    assert screened.time == pytest.approx(6.0, abs=1e-9)
+
+    noisy = simulate_series("step", noise=0.02, outlier_fraction=0.0, seed=1)
+    values = noisy.values.copy()
+    values[[10, 40]] += 1.0  # two wild readings
+    plain = detect_rate_change(noisy.times, values, min_segment=5)
+    with_screen = detect_rate_change(noisy.times, values, min_segment=5, screen_outliers=True)
+    assert plain is None or plain.n_screened == 0
+    assert with_screen.n_screened >= 2
+
+
+# ---------------------------------------------------------------------------
+# package exports
+# ---------------------------------------------------------------------------
+
+
+def test_degradation_api_is_exported_from_the_package():
+    import eispipe
+    from eispipe import degradation
+
+    names = [
+        "estimate_rate", "detect_rate_change", "time_to_threshold", "simulate_series",
+        "describe_trend", "RateEstimate", "RateChange", "ThresholdForecast", "SimulatedSeries",
+    ]
+    for name in names:
+        assert getattr(eispipe, name) is getattr(degradation, name), name
+        assert name in eispipe.__all__, name

@@ -8,6 +8,7 @@ eis-pipeline/
 │   ├── models.py      # coating equivalent-circuit registry (intact / degraded)
 │   ├── fit.py         # circuit fitting + parameter/uncertainty extraction
 │   ├── metrics.py     # Hsu-Mansfeld C, Brasher-Kingsbury water uptake, Rpo, f_break
+│   ├── degradation.py # sensor-agnostic drift: Theil-Sen rate, change point, time-to-threshold forecast
 │   └── plots.py       # Nyquist, Bode, KK residuals, metric time-series (not re-exported)
 ├── tests/             # pytest; one test module per src module
 └── data/raw/          # gitignored
