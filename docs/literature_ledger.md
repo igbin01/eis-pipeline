@@ -10,18 +10,141 @@ Status words: **confirmed** = the claim was checked against the source or a
 reliable description of it; **partly confirmed** = checked for a narrower
 case than the code uses; **not checked** = relied on from memory.
 
-| # | Claim | Source | What the code relies on | Verification status | Who verified it, how |
-|---|---|---|---|---|---|
-| L1 | The Theil-Sen slope (median of pairwise slopes) and its distribution-free confidence interval from the ranks of those slopes | Sen, P. K. (1968), *J. Amer. Statist. Assoc.* 63, 1379-1389 | `estimate_rate`: slope, `low`/`high` via `scipy.stats.theilslopes`; the same slope in the bootstrap of `time_to_threshold` | **Confirmed** for the slope and interval. The intercept is **not** defined in Sen (1968); the code's intercept (median of `value - slope * time`) follows SciPy's documented `method="joint"` option. | Claude (AI assistant, project chat), 2026-11-12, web search of secondary sources (SciPy's `theilslopes` documentation, which cites Sen (1968) and states that the intercept is not part of it); primary source not opened. |
-| L2 | A BIC drop of 10 or more counts as "very strong evidence" for the better model (the 2 ln BF scale: 0-2 not worth more than a bare mention, 2-6 positive, 6-10 strong, > 10 very strong) | Kass, R. E. and Raftery, A. E. (1995), *J. Amer. Statist. Assoc.* 90, 773-795 | `detect_rate_change`: default `min_bic_drop=10` | **Confirmed** through secondary sources quoting the scale; the paper itself was not opened. The value was also chosen independently by simulation (false alarms vs power, script section 6), so the code does not depend on the scale being exact. | Claude (AI assistant, project chat), 2026-11-12, web search of secondary sources (quoting the 2 ln BF scale); primary source not opened. |
-| L3 | With AR(1) noise of lag-1 correlation rho, n readings carry the information of n_eff = n (1 - rho) / (1 + rho) independent ones | von Storch, H. and Zwiers, F. W. (1999), *Statistical Analysis in Climate Research*, Cambridge | `estimate_rate`, `time_to_threshold`: intervals stretched by sqrt(n / n_eff); `detect_rate_change`: likelihood ratio discounted by n_eff / n | **Partly confirmed.** Confirmed for the variance of a *mean* through other sources. Applying the same factor to a trend *slope* (and to a likelihood ratio) is supported only by simulation: coverage 94.1% / 92.9% at rho 0.5 / 0.8 for the rate interval, 93.6% / 90.6% for the forecast (60 readings; script section 7). | Claude (AI assistant, project chat), 2026-11-12, web search of secondary sources (for the mean case); primary source not opened. Slope extension: simulation during development (script sections 7-9, design doc). |
-| L4 | The sample lag-1 autocorrelation of a series with an estimated mean is biased by about -(1 + 3 rho) / n | Kendall, M. G. (1954), *Biometrika* 41, 403-404; Marriott, F. H. C. and Pope, J. A. (1954), *Biometrika* 41, 390-402 | `_lag1_correlation`: the correction `(n r1 + 2) / max(n - 6, 0.75 n)` | **Partly confirmed.** Confirmed for a series with an estimated mean (one parameter). The constant 2 for residuals of a fitted *line* (two parameters) is a heuristic, checked by simulation only: mean estimates 0.31 / 0.51 / 0.81 at true 0.3 / 0.5 / 0.8 on 60 readings. The denominator floor of 0.75 n for short series is an engineering choice, not from any source. | Claude (AI assistant, project chat), 2026-11-12, web search of secondary sources (describing the Kendall / Marriott-Pope result for the mean); primary source not opened. Line constant and floor: simulation during development (design doc, "estimating rho"). |
-| L5 | General guidance on the statistical treatment of corrosion data (only the title was confirmed; the content has not been read) | ASTM G16, *Standard Guide for Applying Statistics to Analysis of Corrosion Data* | Nothing specific: no formula or number in the code comes from it. It is named in the module docstring only as the standard a corrosion-rate analysis would eventually be checked against. | **Not checked.** To read when library access is available. | Nobody yet. |
-| L6 | Residuals of a least-squares fit should be scaled up by sqrt(n / (n - p)) before a residual bootstrap, because fitting p parameters makes them smaller than the true errors | Davison, A. C. and Hinkley, D. V. (1997), *Bootstrap Methods and Their Application*, Cambridge, ch. 6 | `time_to_threshold`: residuals multiplied by sqrt(n / (n - 2)) before resampling | **Not checked** against the book. The effect was measured: the rescaling moved forecast coverage from 92.3% to 93.3% at 40 readings (design doc, forecast table); the Theil-Sen line is not least squares, so the textbook factor is applied by analogy. | Nobody has opened the source. Effect: simulation during development. |
+## Summary
 
-Rows L1 to L4 should be re-confirmed against the primary sources by the
-project owner when library access is available; until then they count as
-confirmed through secondary sources only.
+| Row | Source                              | Status                        |
+|-----|-------------------------------------|-------------------------------|
+| L1  | Sen (1968)                          | Confirmed (secondary sources) |
+| L2  | Kass and Raftery (1995)             | Confirmed (secondary sources) |
+| L3  | von Storch and Zwiers (1999)        | Partly confirmed              |
+| L4  | Kendall (1954); Marriott-Pope (1954) | Partly confirmed              |
+| L5  | ASTM G16                            | Not checked                   |
+| L6  | Davison and Hinkley (1997)          | Not checked                   |
+
+## Rows
+
+### L1: Sen (1968), Theil-Sen slope and interval
+
+**Claim.** The Theil-Sen slope (median of pairwise slopes) and its
+distribution-free confidence interval from the ranks of those slopes.
+
+**Source.** Sen, P. K. (1968), *J. Amer. Statist. Assoc.* 63, 1379-1389.
+
+**What the code relies on.** `estimate_rate`: slope, `low`/`high` via
+`scipy.stats.theilslopes`; the same slope in the bootstrap of
+`time_to_threshold`.
+
+**Verification status.** **Confirmed** for the slope and interval. The
+intercept is **not** defined in Sen (1968); the code's intercept (median of
+`value - slope * time`) follows SciPy's documented `method="joint"` option.
+
+**Who verified it and how.** Claude (AI assistant, project chat), 2026-11-12,
+web search of secondary sources (SciPy's `theilslopes` documentation, which
+cites Sen (1968) and states that the intercept is not part of it); primary
+source not opened.
+
+### L2: Kass and Raftery (1995), BIC drop of 10
+
+**Claim.** A BIC drop of 10 or more counts as "very strong evidence" for the
+better model (the 2 ln BF scale: 0-2 not worth more than a bare mention, 2-6
+positive, 6-10 strong, > 10 very strong).
+
+**Source.** Kass, R. E. and Raftery, A. E. (1995), *J. Amer. Statist.
+Assoc.* 90, 773-795.
+
+**What the code relies on.** `detect_rate_change`: default `min_bic_drop=10`.
+
+**Verification status.** **Confirmed** through secondary sources quoting the
+scale; the paper itself was not opened. The value was also chosen
+independently by simulation (false alarms vs power, script section 6), so the
+code does not depend on the scale being exact.
+
+**Who verified it and how.** Claude (AI assistant, project chat), 2026-11-12,
+web search of secondary sources (quoting the 2 ln BF scale); primary source
+not opened.
+
+### L3: von Storch and Zwiers (1999), effective sample size
+
+**Claim.** With AR(1) noise of lag-1 correlation rho, n readings carry the
+information of n_eff = n (1 - rho) / (1 + rho) independent ones.
+
+**Source.** von Storch, H. and Zwiers, F. W. (1999), *Statistical Analysis
+in Climate Research*, Cambridge.
+
+**What the code relies on.** `estimate_rate`, `time_to_threshold`: intervals
+stretched by sqrt(n / n_eff); `detect_rate_change`: likelihood ratio
+discounted by n_eff / n.
+
+**Verification status.** **Partly confirmed.** Confirmed for the variance of
+a *mean* through other sources. Applying the same factor to a trend *slope*
+(and to a likelihood ratio) is supported only by simulation: coverage 94.1% /
+92.9% at rho 0.5 / 0.8 for the rate interval, 93.6% / 90.6% for the forecast
+(60 readings; script section 7).
+
+**Who verified it and how.** Claude (AI assistant, project chat), 2026-11-12,
+web search of secondary sources (for the mean case); primary source not
+opened. Slope extension: simulation during development (script sections 7-9,
+design doc).
+
+### L4: Kendall (1954) and Marriott and Pope (1954), lag-1 bias
+
+**Claim.** The sample lag-1 autocorrelation of a series with an estimated
+mean is biased by about -(1 + 3 rho) / n.
+
+**Source.** Kendall, M. G. (1954), *Biometrika* 41, 403-404; Marriott,
+F. H. C. and Pope, J. A. (1954), *Biometrika* 41, 390-402.
+
+**What the code relies on.** `_lag1_correlation`: the correction
+`(n r1 + 2) / max(n - 6, 0.75 n)`.
+
+**Verification status.** **Partly confirmed.** Confirmed for a series with an
+estimated mean (one parameter). The constant 2 for residuals of a fitted
+*line* (two parameters) is a heuristic, checked by simulation only: mean
+estimates 0.31 / 0.51 / 0.81 at true 0.3 / 0.5 / 0.8 on 60 readings. The
+denominator floor of 0.75 n for short series is an engineering choice, not
+from any source.
+
+**Who verified it and how.** Claude (AI assistant, project chat), 2026-11-12,
+web search of secondary sources (describing the Kendall / Marriott-Pope
+result for the mean); primary source not opened. Line constant and floor:
+simulation during development (design doc, "estimating rho").
+
+### L5: ASTM G16, statistics for corrosion data
+
+**Claim.** General guidance on the statistical treatment of corrosion data
+(only the title was confirmed; the content has not been read).
+
+**Source.** ASTM G16, *Standard Guide for Applying Statistics to Analysis of
+Corrosion Data*.
+
+**What the code relies on.** Nothing specific: no formula or number in the
+code comes from it. It is named in the module docstring only as the standard
+a corrosion-rate analysis would eventually be checked against.
+
+**Verification status.** **Not checked.** To read when library access is
+available.
+
+**Who verified it and how.** Nobody yet.
+
+### L6: Davison and Hinkley (1997), residual rescaling
+
+**Claim.** Residuals of a least-squares fit should be scaled up by
+sqrt(n / (n - p)) before a residual bootstrap, because fitting p parameters
+makes them smaller than the true errors.
+
+**Source.** Davison, A. C. and Hinkley, D. V. (1997), *Bootstrap Methods and
+Their Application*, Cambridge, ch. 6.
+
+**What the code relies on.** `time_to_threshold`: residuals multiplied by
+sqrt(n / (n - 2)) before resampling.
+
+**Verification status.** **Not checked** against the book. The effect was
+measured: the rescaling moved forecast coverage from 92.3% to 93.3% at 40
+readings (design doc, forecast table); the Theil-Sen line is not least
+squares, so the textbook factor is applied by analogy.
+
+**Who verified it and how.** Nobody has opened the source. Effect: simulation
+during development.
 
 ## Notes
 
@@ -33,3 +156,7 @@ confirmed through secondary sources only.
 * Sources named only for rejected alternatives (Hamed and Rao 1998, Yue et
   al. 2002, Kuensch 1989, Carlstein 1986, Kreiss 1992, Buehlmann 1997) have no
   code behind them and are listed in the design document, not here.
+
+Rows L1 to L4 should be re-confirmed against the primary sources by the
+project owner when library access is available; until then they count as
+confirmed through secondary sources only.
