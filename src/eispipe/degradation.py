@@ -43,12 +43,12 @@ Assumptions shared by all functions (in plain language):
   straight correlated data false changes fell from 29 to 4 in 500 runs at
   rho 0.5 and from 193 to 9 at rho 0.8; with independent readings it lost at
   most half a point of power.
-* Short series: the intervals can be trusted from about 20 readings. With
-  fewer, ``rho`` is too uncertain to correct for correlation fully: at rho
-  0.5 the 95% intervals covered 88-90% (rate) and 84-88% (forecast) of runs
-  with 10-15 readings, and 92% / 89% with 20 (``scripts/validate_degradation.py``
-  section 9). Even at 20-60 readings the forecast interval at rho 0.5-0.8 is
-  a little too narrow (89-94%); at rho 0.8 and 30 readings, 86%.
+* Short series: with independent noise and 20 readings the 95% intervals
+  cover about 95%; with correlated noise (rho 0.5) about 90 to 92%; with 10
+  readings about 84 to 88% (``scripts/validate_degradation.py`` section 9).
+  With few readings ``rho`` is too uncertain to correct for correlation
+  fully. Even at 20-60 readings the forecast interval at rho 0.5-0.8 is a
+  little too narrow (89-94%); at rho 0.8 and 30 readings, 86%.
 * Over the stretch of data used, the underlying change is a straight line
   (or, for :func:`detect_rate_change`, two straight lines joined at one point).
   Not handled: curved (nonlinear) trends, and a rate that changes inside the
@@ -60,10 +60,12 @@ Assumptions shared by all functions (in plain language):
 * Forecasts assume the current trend simply continues; they cannot anticipate
   a process change that has not happened yet.
 
-TODO verify against ASTM G16 and Sen (1968): the Theil-Sen slope and its
-confidence interval, and the use of a linear rate for corrosion data. The
-intercept is not taken from Sen (1968); it follows SciPy's documented
-``method="joint"`` option of ``theilslopes``.
+Sources: every published source this module leans on, what is taken from it
+and how far it has been checked, is listed in ``docs/literature_ledger.md``
+(rows L1-L6). In short: the Theil-Sen slope and interval follow Sen (1968)
+(ledger L1; the intercept is not from Sen but SciPy's documented
+``method="joint"``); the use of a straight-line rate for corrosion data is
+in the spirit of ASTM G16 (ledger L5, not yet checked).
 """
 
 from __future__ import annotations
@@ -293,8 +295,8 @@ def _lag1_correlation(resid: np.ndarray, scale: float) -> float:
 
     The plain lag-1 autocorrelation r1 of residuals is biased towards zero,
     by about (1 + 3 rho) / n for each fitted parameter (the mean-only case
-    is a classical result; TODO verify against Kendall (1954) and Marriott and
-    Pope (1954)). A straight line has two, so the estimate used is
+    is a classical result: Kendall (1954), Marriott and Pope (1954); ledger
+    L4, confirmed for the mean only). A straight line has two, so the estimate used is
     ``(n * r1 + 2) / (n - 6)``, the solution of E[r1] = rho - 2 (1 + 3 rho) / n.
     The doubling for a line is our own reasoning, checked by simulation: on
     60 readings it averaged 0.31, 0.51 and 0.81 at true 0.3, 0.5 and 0.8
@@ -371,17 +373,19 @@ def estimate_rate(times, values, window=None, *, level=0.95, dependence="auto") 
     at least :data:`MIN_POINTS_FOR_RHO` readings, otherwise ``rho`` is NaN and
     the interval is the independent one) and stretches Sen's interval around
     the slope by ``sqrt(n / n_eff)`` with ``n_eff = n (1 - rho) / (1 + rho)``,
-    the variance inflation of AR(1) noise (TODO verify: effective sample size,
-    e.g. von Storch and Zwiers (1999)). ``dependence="independent"`` gives the
-    previous interval unchanged. Alternatives that were tried and rejected are
-    recorded in ``docs/degradation_design.md``.
+    the effective sample size of AR(1) noise (von Storch and Zwiers (1999);
+    ledger L3, confirmed for a mean, extended to a slope by simulation only).
+    ``dependence="independent"`` gives the previous interval unchanged.
+    Alternatives that were tried and rejected are recorded in
+    ``docs/degradation_design.md``.
 
     How often the 95% interval contains the true rate
     (``scripts/validate_degradation.py``, 60 readings, straight-line trend):
     96.3% of 1000 runs with independent noise and 5% outliers; with AR(1)
     noise 94.1% at rho 0.5 and 92.9% at rho 0.8 ("independent": 76.6% and
-    49.8%). Trust it from about 20 readings: at rho 0.5 it covered 91.8% with
-    20 readings but 88.0-89.8% with 10-15.
+    49.8%). Short series (script section 9): with independent noise and 20
+    readings it covers about 95%; with correlated noise (rho 0.5) about 92%;
+    with 10 readings about 88% at rho 0.5 (96% independent).
 
     Assumptions: the change is a straight line over the readings used; the
     scatter's size does not change over time; any correlation is of the
@@ -389,7 +393,8 @@ def estimate_rate(times, values, window=None, *, level=0.95, dependence="auto") 
     use ``window`` or pass only the readings after the change -- otherwise
     the bend shows up as apparent correlation and the line is wrong.
 
-    TODO verify against ASTM G16 and Sen (1968): the slope and its interval.
+    Sources: slope and interval, Sen (1968), ledger L1 (confirmed via SciPy's
+    documentation); linear corrosion rates, ASTM G16, ledger L5 (not checked).
     """
     _check_level(level)
     _check_dependence(dependence)
@@ -531,8 +536,9 @@ def detect_rate_change(
     less power; see ``docs/degradation_design.md``.
 
     A change is reported only if that drop is at least ``min_bic_drop``
-    (default 10). The value was chosen from simulation, not taken from a
-    published scale (TODO verify against Kass and Raftery (1995)). In
+    (default 10). The value was chosen from simulation; it also matches the
+    "very strong evidence" line of the Kass and Raftery (1995) scale (ledger
+    L2, confirmed through secondary sources). In
     ``scripts/validate_degradation.py`` (500 straight series each, no
     screening): threshold 2 gave 6 false changes without outliers and 25 with
     5% outliers; 6 gave 0 and 13; 10 gave 0 and 3; 15 gave 0 and 2. Raising
@@ -671,8 +677,9 @@ def time_to_threshold(
 
     Two small corrections keep the interval honest: the residuals are scaled
     up by sqrt(n / (n - 2)) because fitting the line made them slightly
-    smaller than the real scatter (TODO verify against Davison and Hinkley
-    (1997) for this rescaling), and each resampled residual gets a little
+    smaller than the real scatter (the usual residual-bootstrap rescaling,
+    Davison and Hinkley (1997); ledger L6, not checked against the book, and
+    applied to a Theil-Sen line by analogy), and each resampled residual gets a little
     jitter (half a robust standard deviation, rescaled so the overall spread
     is unchanged) so that repeated residuals do not pile the Theil-Sen slopes
     up at the original value. In ``scripts/validate_degradation.py`` (5%
@@ -692,9 +699,10 @@ def time_to_threshold(
     With AR(1) noise (60 readings, no outliers, straight-line trend) the 95%
     interval contained the true crossing time in 93.6% of runs at rho 0.5 and
     90.6% at rho 0.8 ("independent": 72.2% and 45.0%), and 94.6% for
-    independent noise; with 30 readings at rho 0.8, 86.0%. Trust it from
-    about 20 readings: at rho 0.5 it covered 89.4% with 20 readings and
-    84.2-88.2% with 10-15. A block bootstrap and an AR(1) sieve bootstrap were
+    independent noise; with 30 readings at rho 0.8, 86.0%. Short series
+    (script section 9): with independent noise and 20 readings it covers
+    about 95%; with correlated noise (rho 0.5) about 90%; with 10 readings
+    about 84% at rho 0.5 (93% independent). A block bootstrap and an AR(1) sieve bootstrap were
     tried instead of the stretch and rejected; see
     ``docs/degradation_design.md``.
 
@@ -748,7 +756,7 @@ def time_to_threshold(
     fitted = rate.intercept + rate.rate * t
     # Fitted residuals are slightly smaller than the real errors (two line
     # parameters were fitted to the same data): scale them back up.
-    # TODO verify against Davison and Hinkley (1997).
+    # Davison and Hinkley (1997), docs/literature_ledger.md row L6 (not checked).
     resid = (y - fitted) * math.sqrt(n / (n - 2))
     rng = np.random.default_rng(seed)
     draws = resid[rng.integers(0, n, size=(int(n_boot), n))]
