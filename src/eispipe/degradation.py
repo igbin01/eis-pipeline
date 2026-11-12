@@ -14,16 +14,30 @@ value units per time unit of ``times``; :func:`per_year` converts them.
 
 Assumptions shared by all functions (in plain language):
 
-* Readings are independent: the scatter of one reading around the trend does
-  not depend on the scatter of the previous one. Slowly wandering errors
-  (autocorrelation) make every interval here too narrow: in
-  ``scripts/validate_degradation.py``, with noise correlated from reading to
-  reading (AR(1)) at the same overall size, the 95% intervals covered the
-  truth in only about 77-79% of runs at rho 0.5 and 51-53% at rho 0.8. All
-  coverage figures quoted in this module assume independent noise and a
-  straight-line trend.
+* Correlation between neighbouring readings is handled by
+  :func:`estimate_rate` and :func:`time_to_threshold` by default
+  (``dependence="auto"``): they estimate the lag-1 correlation ``rho`` of the
+  scatter around the line and widen their intervals to what the effective
+  number of independent readings, ``n_eff = n (1 - rho) / (1 + rho)``, allows.
+  In ``scripts/validate_degradation.py`` (60 readings, AR(1) noise, no
+  outliers) the 95% intervals then covered the truth in 94.1% (rate) and
+  93.6% (forecast) of runs at rho 0.5 and 92.9% / 90.6% at rho 0.8 --
+  against 76.6% / 72.2% and 49.8% / 45.0% with ``dependence="independent"``.
+  Short series stay somewhat optimistic (30 readings, rho 0.8: 89.3% /
+  86.0%). The model behind it is AR(1), each reading's scatter carrying over
+  part of the previous one's; slower, wandering drifts are not captured.
+* :func:`detect_rate_change` still assumes independent readings: on straight
+  correlated data it reported a false change in 23 of 500 runs at rho 0.5
+  and 170 of 500 at rho 0.8. Treat its result with caution when ``rho`` from
+  :func:`estimate_rate` is large.
 * Over the stretch of data used, the underlying change is a straight line
   (or, for :func:`detect_rate_change`, two straight lines joined at one point).
+  Not handled: curved (nonlinear) trends, and a rate that changes inside the
+  readings passed to :func:`estimate_rate` or :func:`time_to_threshold`.
+  Both leave a systematic pattern in the residuals, which "auto" reads as
+  correlation; the interval widens, but the line itself is wrong. Check with
+  :func:`detect_rate_change` and pass only the readings after a change.
+* All coverage figures quoted here assume a straight-line trend.
 * Forecasts assume the current trend simply continues; they cannot anticipate
   a process change that has not happened yet.
 
@@ -57,6 +71,18 @@ __all__ = [
 
 #: Fewest points for which a rate and its interval are reported.
 MIN_POINTS = 3
+
+#: ``dependence`` options: "auto" estimates how strongly neighbouring readings
+#: are correlated and widens the intervals for it; "independent" assumes they
+#: are not (the behaviour before this option existed).
+DEPENDENCE_MODES = ("auto", "independent")
+#: Fewest readings for which "auto" estimates the correlation; below this the
+#: intervals are the independent ones and ``rho`` is NaN.
+MIN_POINTS_FOR_RHO = 10
+#: Largest correlation used, so the effective sample size stays above ~2.6% of n.
+MAX_RHO = 0.95
+#: From this correlation on, describe_trend says the readings are strongly correlated.
+STRONG_CORRELATION = 0.5
 
 #: How many of each time unit make one year (a year is 365.25 days).
 UNITS_PER_YEAR = {
@@ -98,6 +124,12 @@ class RateEstimate:
     fitted value at time 0: the median of ``value - rate * time`` over all
     readings. All of them are NaN when there were fewer than
     :data:`MIN_POINTS` points.
+
+    ``rho`` is the estimated correlation between neighbouring readings' scatter
+    (0 = independent; NaN if there were too few readings to estimate it) and
+    ``n_eff`` the effective number of independent readings,
+    ``n * (1 - rho) / (1 + rho)``; the interval is as wide as ``n_eff``
+    independent readings would make it. ``dependence`` records the mode used.
     """
 
     rate: float
@@ -106,6 +138,9 @@ class RateEstimate:
     intercept: float
     n: int
     level: float = 0.95
+    rho: float = 0.0
+    n_eff: float | None = None
+    dependence: str = "independent"
 
     @property
     def significant(self) -> bool:
@@ -166,6 +201,16 @@ class ThresholdForecast:
         """True if a forecast was made."""
         return self.time_to_cross is not None and math.isfinite(self.time_to_cross)
 
+    @property
+    def rho(self) -> float:
+        """Estimated correlation between neighbouring readings (see :class:`RateEstimate`)."""
+        return self.rate.rho
+
+    @property
+    def n_eff(self) -> float | None:
+        """Effective number of independent readings (see :class:`RateEstimate`)."""
+        return self.rate.n_eff
+
 
 @dataclass(frozen=True)
 class SimulatedSeries:
@@ -214,6 +259,34 @@ def _check_level(level: float) -> None:
         raise ValueError(f"level must be between 0 and 1, got {level!r}")
 
 
+def _check_dependence(dependence: str) -> None:
+    if dependence not in DEPENDENCE_MODES:
+        raise ValueError(f"dependence must be one of {DEPENDENCE_MODES}, got {dependence!r}")
+
+
+def _lag1_correlation(resid: np.ndarray, scale: float) -> float:
+    """Correlation between neighbouring residuals of a fitted straight line.
+
+    The plain lag-1 autocorrelation r1 of residuals is biased towards zero,
+    by about (1 + 3 rho) / n for each fitted parameter (the mean-only case
+    is a classical result; TODO verify against Kendall (1954) and Marriott and
+    Pope (1954)). A straight line has two, so the estimate used is
+    ``(n * r1 + 2) / (n - 6)``, the solution of E[r1] = rho - 2 (1 + 3 rho) / n.
+    The doubling for a line is our own reasoning, checked by simulation: on
+    60 readings it averaged 0.31, 0.51 and 0.81 at true 0.3, 0.5 and 0.8
+    (raw r1: 0.24, 0.43, 0.69). Negative values are set to 0 (they would only
+    narrow the interval) and values above :data:`MAX_RHO` to that cap.
+    Residuals at floating-point noise level count as independent (0).
+    """
+    n = resid.size
+    centred = resid - resid.mean()
+    denom = float(centred @ centred)
+    if math.sqrt(denom / n) <= 1e-9 * scale:
+        return 0.0
+    r1 = float(centred[:-1] @ centred[1:]) / denom
+    return min(max((n * r1 + 2.0) / (n - 6.0), 0.0), MAX_RHO)
+
+
 def _theil_sen(t: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Theil-Sen slope and intercept for every row of ``Y`` (same ``t`` for all).
 
@@ -238,7 +311,7 @@ def _theil_sen(t: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 # ---------------------------------------------------------------------------
 
 
-def estimate_rate(times, values, window=None, *, level=0.95) -> RateEstimate:
+def estimate_rate(times, values, window=None, *, level=0.95, dependence="auto") -> RateEstimate:
     """Robust straight-line rate of change with a confidence interval.
 
     The rate is the Theil-Sen slope (``scipy.stats.theilslopes``): the median
@@ -253,23 +326,41 @@ def estimate_rate(times, values, window=None, *, level=0.95) -> RateEstimate:
     within that span before the last one, e.g. the last 90 days. With fewer
     than :data:`MIN_POINTS` readings the rate and interval are NaN.
 
+    ``dependence="auto"`` (default) allows for correlation between
+    neighbouring readings. It estimates ``rho`` from the residuals around the
+    line (a bias-corrected lag-1 autocorrelation, see ``_lag1_correlation``;
+    at least :data:`MIN_POINTS_FOR_RHO` readings, otherwise ``rho`` is NaN and
+    the interval is the independent one) and stretches Sen's interval around
+    the slope by ``sqrt(n / n_eff)`` with ``n_eff = n (1 - rho) / (1 + rho)``,
+    the variance inflation of AR(1) noise (TODO verify: effective sample size,
+    e.g. von Storch and Zwiers (1999)). ``dependence="independent"`` gives the
+    previous interval unchanged.
+
+    Why this rule: it was compared by simulation with two alternatives. Putting
+    the same inflation into the variance of Kendall's statistic behind Sen's
+    interval (the idea of the Hamed and Rao (1998) correction; TODO verify)
+    covered similarly but made the interval about 10 times wider at rho 0.8,
+    because it reaches into the noisy extreme pairwise slopes; the AR(1) form
+    of the Hamed-Rao factor itself under-covered (90.2% at rho 0.8, 60
+    readings). Trend-free pre-whitening (Yue et al. (2002); TODO verify) is a
+    test of whether there is a trend, not an interval, so it does not apply.
+
     How often the 95% interval contains the true rate
-    (``scripts/validate_degradation.py``, 60 readings): 95.9% of 1000 runs
-    with independent noise and 5% outliers. That figure assumes independent
-    noise and a straight-line trend. With noise correlated from reading to
-    reading (AR(1), same overall size, no outliers) it fell to 76.5% at
-    rho 0.5 and 52.5% at rho 0.8 (94.9% for independent noise in the same
-    setup) -- the interval is then far too narrow.
+    (``scripts/validate_degradation.py``, 60 readings, straight-line trend):
+    96.3% of 1000 runs with independent noise and 5% outliers; with AR(1)
+    noise 94.1% at rho 0.5 and 92.9% at rho 0.8 ("independent": 76.6% and
+    49.8%).
 
     Assumptions: the change is a straight line over the readings used; the
-    scatter around it is independent from reading to reading and does not
-    change over time. If the rate itself changed (see
-    :func:`detect_rate_change`), use ``window`` or pass only the readings after
-    the change.
+    scatter's size does not change over time; any correlation is of the
+    AR(1) kind. If the rate itself changed (see :func:`detect_rate_change`),
+    use ``window`` or pass only the readings after the change -- otherwise
+    the bend shows up as apparent correlation and the line is wrong.
 
     TODO verify against ASTM G16 and Sen (1968): the slope and its interval.
     """
     _check_level(level)
+    _check_dependence(dependence)
     t, y = _series(times, values)
     if window is not None:
         if not window > 0:
@@ -277,20 +368,39 @@ def estimate_rate(times, values, window=None, *, level=0.95) -> RateEstimate:
         if t.size:
             keep = t >= t[-1] - window
             t, y = t[keep], y[keep]
-    if t.size < MIN_POINTS:
+    n = int(t.size)
+    if n < MIN_POINTS:
         nan = math.nan
-        return RateEstimate(rate=nan, low=nan, high=nan, intercept=nan, n=int(t.size), level=level)
+        return RateEstimate(rate=nan, low=nan, high=nan, intercept=nan, n=n, level=level,
+                            rho=nan, n_eff=nan, dependence=dependence)
     # "joint" intercept: median(y - rate * t) uses every reading; the
     # "separate" one, median(y) - rate * median(t), hinges on the one or two
     # middle readings and made forecast intervals conservative.
     fit = stats.theilslopes(y, t, alpha=level, method="joint")
+    slope, low, high = float(fit.slope), float(fit.low_slope), float(fit.high_slope)
+    if dependence == "independent":
+        rho = 0.0
+    elif n < MIN_POINTS_FOR_RHO:
+        rho = math.nan  # too few readings to tell; keep the independent interval
+    else:
+        resid = y - (fit.intercept + fit.slope * t)
+        rho = _lag1_correlation(resid, max(float(np.ptp(y)), float(np.max(np.abs(y)))))
+    inflation = (1.0 + rho) / (1.0 - rho) if rho > 0 else 1.0
+    if inflation > 1.0:
+        # Correlated readings carry less information: widen the interval to
+        # what n_eff = n / inflation independent readings would give.
+        widen = math.sqrt(inflation)
+        low, high = slope - widen * (slope - low), slope + widen * (high - slope)
     return RateEstimate(
-        rate=float(fit.slope),
-        low=float(fit.low_slope),
-        high=float(fit.high_slope),
+        rate=slope,
+        low=low,
+        high=high,
         intercept=float(fit.intercept),
-        n=int(t.size),
+        n=n,
         level=level,
+        rho=rho,
+        n_eff=n / inflation,
+        dependence=dependence,
     )
 
 
@@ -395,7 +505,11 @@ def detect_rate_change(
 
     Assumptions: at most one change; straight segments; independent scatter
     with the same spread throughout. Without screening, a few wild readings
-    can create or hide a change.
+    can create or hide a change. Correlated readings are not allowed for
+    here: on straight data with AR(1) noise it reported a false change in 23
+    of 500 runs at rho 0.5 and 170 of 500 at rho 0.8
+    (``scripts/validate_degradation.py``). If :func:`estimate_rate` reports
+    a large ``rho``, treat a detected change with caution.
 
     Raises ``ValueError`` if ``min_segment < 3`` or there are fewer than
     ``2 * min_segment`` readings.
@@ -460,7 +574,9 @@ def detect_rate_change(
 _JITTER = 0.5
 
 
-def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000, seed=0):
+def time_to_threshold(
+    times, values, threshold, horizon, level=0.95, n_boot=1000, seed=0, *, dependence="auto"
+):
     """Forecast when the trend reaches ``threshold``, with an interval.
 
     Fits the Theil-Sen line of :func:`estimate_rate` to all readings given,
@@ -484,13 +600,28 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
     earlier check on other seeds gave 92.6% with 20 readings, so treat short
     series as slightly optimistic.
 
-    Those figures assume independent noise and a straight-line trend. With
-    noise correlated from reading to reading (AR(1), same overall size, no
-    outliers, 60 readings) the 95% interval contained the true crossing time
-    in only 78.6% of runs at rho 0.5 and 50.6% at rho 0.8 (94.0% for
-    independent noise in the same setup). Resampling residuals one by one
-    treats each reading as independent, so with correlated noise the forecast
-    looks more certain than it is.
+    Correlated readings (``dependence="auto"``, the default): the rate comes
+    from :func:`estimate_rate` with the same setting, so its significance check
+    already allows for correlation, and the bootstrap interval is stretched
+    around its median by the same ``sqrt(n / n_eff)``. Resampling residuals
+    one by one treats readings as independent; the stretch restores the
+    information lost to correlation, while the bootstrap still supplies the
+    skewed shape of a crossing time. With ``rho`` 0 (or
+    ``dependence="independent"``) the result is the plain bootstrap interval.
+    With AR(1) noise (60 readings, no outliers, straight-line trend) the 95%
+    interval contained the true crossing time in 93.6% of runs at rho 0.5 and
+    90.6% at rho 0.8 ("independent": 72.2% and 45.0%), and 94.6% for
+    independent noise; with 30 readings at rho 0.8, 86.0%.
+
+    Why not a block bootstrap: a moving-block bootstrap of the residuals
+    (Kuensch (1989); block length from rho by the AR(1) rule
+    (2 rho / (1 - rho**2))**(2/3) * n**(1/3), Carlstein (1986); both TODO
+    verify) was tried first and covered only 85% at rho 0.5 and 66% at
+    rho 0.8 with 60 readings -- too few blocks to reproduce the spread. An
+    AR(1) sieve bootstrap (resampling innovations and rebuilding the
+    correlated residuals; Kreiss (1992), Buehlmann (1997); TODO verify) met the
+    targets but was slightly less accurate than the stretch at every
+    correlation tried (e.g. 90.2% vs 90.8% at rho 0.8).
 
     No number is given -- ``time_to_cross`` is ``None`` and ``reason`` says
     why -- when there are too few readings, the rate is not significantly
@@ -499,10 +630,11 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
     the median crossing lies beyond ``horizon``.
 
     Assumptions: the current straight-line trend continues unchanged; the
-    scatter is independent from reading to reading and looks the same in the
-    future as in the past. If the rate changed recently, pass only the
-    readings since the change. The interval reflects scatter around the
-    trend, not the chance that the process itself changes.
+    scatter looks the same in the future as in the past, and any correlation
+    is of the AR(1) kind. Not handled: curved trends and a rate change inside
+    the readings passed -- pass only the readings since a change. The
+    interval reflects scatter around the trend, not the chance that the
+    process itself changes.
 
     Same ``seed``, same result.
     """
@@ -511,9 +643,10 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
         raise ValueError(f"horizon must be > 0, got {horizon!r}")
     if int(n_boot) != n_boot or n_boot < 1:
         raise ValueError(f"n_boot must be a positive integer, got {n_boot!r}")
+    _check_dependence(dependence)
     t, y = _series(times, values)
     threshold = float(threshold)
-    rate = estimate_rate(t, y, level=level)
+    rate = estimate_rate(t, y, level=level, dependence=dependence)
 
     def no_forecast(reason: str) -> ThresholdForecast:
         return ThresholdForecast(
@@ -569,6 +702,16 @@ def time_to_threshold(times, values, threshold, horizon, level=0.95, n_boot=1000
     low, median, high = np.quantile(times_to_cross, [tail, 0.5, 1.0 - tail], method="inverted_cdf")
     if not math.isfinite(median):
         return no_forecast(f"the crossing is not expected within the forecast horizon ({horizon:g})")
+    if math.isfinite(rate.rho) and rate.rho > 0:
+        # Correlated readings: stretch the bootstrap interval around its median
+        # by the same factor as the rate interval, sqrt(n / n_eff). The
+        # bootstrap keeps supplying the (skewed) shape; the stretch supplies the
+        # information lost to correlation.
+        widen = math.sqrt((1.0 + rate.rho) / (1.0 - rate.rho))
+        low = max(0.0, median - widen * (median - low))
+        high = median + widen * (high - median)
+        if high > horizon:
+            high = math.inf
     return ThresholdForecast(
         threshold=threshold, horizon=horizon, level=level, rate=rate,
         time_to_cross=float(median), low=float(low), high=float(high),
@@ -594,6 +737,7 @@ def simulate_series(
     change_time=None,
     rate_after=None,
     acceleration=None,
+    ar1_rho=0.0,
     seed=0,
 ) -> SimulatedSeries:
     """Synthetic series with known answers, for testing the estimators.
@@ -608,10 +752,14 @@ def simulate_series(
       ``start_value + rate * t + acceleration * t**2 / 2`` (default
       ``acceleration = rate / duration``, doubling the rate by the end).
 
-    ``n`` evenly spaced readings from 0 to ``duration`` get independent
-    Gaussian noise of standard deviation ``noise``; each reading has
-    probability ``outlier_fraction`` of an extra error of
-    ``± outlier_size * noise``. Same ``seed``, same series.
+    ``n`` evenly spaced readings from 0 to ``duration`` get Gaussian noise of
+    standard deviation ``noise``: independent from reading to reading when
+    ``ar1_rho`` is 0, otherwise AR(1) -- each reading's error is ``ar1_rho``
+    times the previous one plus fresh noise scaled by sqrt(1 - ar1_rho**2),
+    so the overall size stays ``noise``. Each reading has probability
+    ``outlier_fraction`` of an extra error of ``± outlier_size * noise``.
+    Same ``seed``, same series; ``ar1_rho=0`` gives exactly the independent
+    series.
     """
     if kind not in ("constant", "step", "accelerating"):
         raise ValueError(f"kind must be 'constant', 'step' or 'accelerating', got {kind!r}")
@@ -619,9 +767,11 @@ def simulate_series(
         raise ValueError("need n >= 2 and duration > 0")
     if not 0.0 <= outlier_fraction <= 1.0 or noise < 0:
         raise ValueError("need noise >= 0 and 0 <= outlier_fraction <= 1")
+    if not 0.0 <= ar1_rho < 1.0:
+        raise ValueError(f"ar1_rho must be in [0, 1), got {ar1_rho!r}")
     rng = np.random.default_rng(seed)
     t = np.linspace(0.0, float(duration), int(n))
-    truth = {"start_value": start_value, "rate": rate, "noise": noise,
+    truth = {"start_value": start_value, "rate": rate, "noise": noise, "ar1_rho": ar1_rho,
              "rate_after": None, "change_time": None, "acceleration": None}
 
     if kind == "constant":
@@ -636,7 +786,15 @@ def simulate_series(
         clean = start_value + rate * t + 0.5 * acceleration * t**2
         truth.update(acceleration=acceleration)
 
-    values = clean + rng.normal(0.0, noise, size=t.size) if noise > 0 else clean.copy()
+    if noise > 0:
+        errors = rng.normal(0.0, noise, size=t.size)
+        if ar1_rho > 0:
+            fresh = math.sqrt(1.0 - ar1_rho**2)
+            for i in range(1, t.size):
+                errors[i] = ar1_rho * errors[i - 1] + fresh * errors[i]
+        values = clean + errors
+    else:
+        values = clean.copy()
     outliers = rng.random(t.size) < outlier_fraction
     signs = rng.choice([-1.0, 1.0], size=t.size)
     values = values + np.where(outliers, signs * outlier_size * noise, 0.0)
@@ -698,15 +856,16 @@ def describe_trend(result, *, quantity, unit, time_unit="year") -> str:
         it reaches the 0.5 mm limit in about 3.2 years (2.4 to 4.6).
     """
     if isinstance(result, RateEstimate):
-        return _rate_sentence(result, quantity, unit, time_unit)
+        return _rate_sentence(result, quantity, unit, time_unit) + _correlation_note(result)
     if not isinstance(result, ThresholdForecast):
         raise TypeError(
             f"describe_trend needs a RateEstimate or ThresholdForecast, got {type(result).__name__}"
         )
     first = _rate_sentence(result.rate, quantity, unit, time_unit)
+    note = _correlation_note(result.rate)
     limit = f"the {result.threshold:g} {unit} limit" if unit else f"the {result.threshold:g} limit"
     if not result.ok:
-        return f"{first} It is not forecast to reach {limit}: {result.reason}."
+        return f"{first} It is not forecast to reach {limit}: {result.reason}.{note}"
     plural = time_unit if time_unit.endswith("s") else f"{time_unit}s"
     d = _decimals(result.time_to_cross, result.low, result.high)
     upper = (
@@ -714,5 +873,11 @@ def describe_trend(result, *, quantity, unit, time_unit="year") -> str:
     )
     return (
         f"{first} At this pace it reaches {limit} in about {_fmt(result.time_to_cross, d)} "
-        f"{plural} ({_fmt(result.low, d)} to {upper})."
+        f"{plural} ({_fmt(result.low, d)} to {upper}).{note}"
     )
+
+
+def _correlation_note(rate: RateEstimate) -> str:
+    if math.isfinite(rate.rho) and rate.rho >= STRONG_CORRELATION:
+        return " Readings are strongly correlated in time, so the range is wide."
+    return ""

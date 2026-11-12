@@ -494,3 +494,143 @@ def test_degradation_api_is_exported_from_the_package():
     for name in names:
         assert getattr(eispipe, name) is getattr(degradation, name), name
         assert name in eispipe.__all__, name
+
+
+# ---------------------------------------------------------------------------
+# correlated noise: dependence="auto" (default) vs "independent"
+# ---------------------------------------------------------------------------
+
+
+def _ar1(rho, seed, n=60, outlier_fraction=0.0):
+    return simulate_series("constant", n=n, rate=0.1, noise=0.02, ar1_rho=rho,
+                           outlier_fraction=outlier_fraction, seed=seed)
+
+
+def test_simulate_series_ar1_noise_has_requested_correlation_and_size():
+    s = simulate_series("constant", n=20_000, noise=0.02, ar1_rho=0.8, outlier_fraction=0.0, seed=0)
+    e = s.values - s.clean
+    assert np.std(e) == pytest.approx(0.02, rel=0.05)
+    assert np.corrcoef(e[:-1], e[1:])[0, 1] == pytest.approx(0.8, abs=0.02)
+    # rho 0 is the old independent noise, draw for draw
+    np.testing.assert_array_equal(simulate_series("constant", seed=3, ar1_rho=0.0).values,
+                                  simulate_series("constant", seed=3).values)
+
+
+def test_rho_is_estimated_within_tolerance():
+    # average over 200 runs of 60 readings within 0.05 of the truth
+    for rho in (0.5, 0.8):
+        est = [estimate_rate(s.times, s.values).rho for s in (_ar1(rho, seed) for seed in range(200))]
+        assert np.mean(est) == pytest.approx(rho, abs=0.05), rho
+    independent = [estimate_rate(s.times, s.values).rho
+                   for s in (_ar1(0.0, seed) for seed in range(200))]
+    assert np.mean(independent) < 0.1
+    assert min(independent) >= 0.0  # negative correlation is never used to narrow
+
+
+def test_rate_estimate_reports_rho_and_effective_sample_size():
+    s = _ar1(0.8, seed=1)
+    est = estimate_rate(s.times, s.values)
+    assert est.dependence == "auto"
+    assert 0.0 < est.rho <= 0.95
+    assert est.n_eff == pytest.approx(est.n * (1 - est.rho) / (1 + est.rho))
+
+    old = estimate_rate(s.times, s.values, dependence="independent")
+    assert (old.dependence, old.rho, old.n_eff) == ("independent", 0.0, float(old.n))
+    assert est.rate == old.rate  # same slope, wider interval
+    assert est.high - est.low > old.high - old.low
+
+    fc = time_to_threshold(s.times, s.values, threshold=1.5, horizon=50.0, n_boot=200)
+    assert (fc.rho, fc.n_eff) == (fc.rate.rho, fc.rate.n_eff)
+
+
+def test_independent_mode_reproduces_the_previous_numbers_exactly():
+    # recorded from the implementation before dependence= existed
+    recorded = {
+        5: ((0.10002050872023205, 0.09805924693455706, 0.10194695944737199, -0.005257291640160255),
+            (5.054318232446739, 4.84728692361341, 5.2491882879579785)),
+        6: ((0.09857411200667665, 0.09702101088855959, 0.10043413502668838, 0.010960317584450305),
+            (5.097783014007966, 4.923685787467197, 5.32336132508181)),
+    }
+    for seed, (rate, forecast) in recorded.items():
+        s = simulate_series("constant", seed=seed)
+        r = estimate_rate(s.times, s.values, dependence="independent")
+        f = time_to_threshold(s.times, s.values, threshold=1.5, horizon=50.0, n_boot=400,
+                              seed=seed, dependence="independent")
+        assert (r.rate, r.low, r.high, r.intercept) == rate
+        assert (f.time_to_cross, f.low, f.high) == forecast
+
+
+def test_noise_free_data_needs_no_widening():
+    t = np.linspace(0.0, 10.0, 41)
+    est = estimate_rate(t, 0.1 * t)
+    assert est.rho == 0.0 and est.low == pytest.approx(0.1) and est.high == pytest.approx(0.1)
+
+
+def test_too_few_points_to_estimate_rho():
+    t = np.arange(8.0)
+    est = estimate_rate(t, 0.1 * t + 0.01 * (-1.0) ** t)
+    assert math.isnan(est.rho)
+    assert est.n_eff == float(est.n)  # falls back to the independent interval
+
+
+def test_dependence_must_be_known():
+    with pytest.raises(ValueError, match="dependence"):
+        estimate_rate(GOOD_T, GOOD_Y, dependence="ar2")
+    with pytest.raises(ValueError, match="dependence"):
+        time_to_threshold(GOOD_T, GOOD_Y, 10.0, horizon=5.0, dependence="sometimes")
+
+
+def _coverage(rho, outlier_fraction=0.0, runs=400, n_boot=400):
+    rate_hits, fc_hits, rate_w, fc_w = 0, 0, [], []
+    for seed in range(runs):
+        s = _ar1(rho, seed, outlier_fraction=outlier_fraction)
+        est = estimate_rate(s.times, s.values)
+        rate_hits += est.low <= 0.1 <= est.high
+        rate_w.append(est.high - est.low)
+        fc = time_to_threshold(s.times, s.values, threshold=1.5, horizon=50.0, n_boot=n_boot,
+                               seed=seed)
+        fc_hits += fc.ok and fc.low <= 15.0 - s.times[-1] <= fc.high
+        fc_w.append(fc.high - fc.low if fc.ok else np.nan)
+    return rate_hits / runs, fc_hits / runs, np.mean(rate_w), np.nanmean(fc_w)
+
+
+@pytest.mark.slow
+def test_auto_coverage_with_independent_noise_stays_93_to_97():
+    rate_cov, fc_cov, _, _ = _coverage(0.0, outlier_fraction=0.05)
+    assert 0.93 <= rate_cov <= 0.97
+    assert 0.93 <= fc_cov <= 0.97
+
+
+@pytest.mark.slow
+def test_auto_coverage_with_correlated_noise():
+    _, _, rate_w0, fc_w0 = _coverage(0.0)
+
+    rate_cov, fc_cov, _, _ = _coverage(0.5)
+    assert 0.90 <= rate_cov <= 0.98
+    assert 0.90 <= fc_cov <= 0.98
+
+    rate_cov, fc_cov, rate_w, fc_w = _coverage(0.8)
+    assert rate_cov >= 0.88
+    assert fc_cov >= 0.88
+    assert rate_w >= 2.0 * rate_w0  # clearly wider than for independent noise
+    assert fc_w >= 2.0 * fc_w0
+
+
+def test_describe_trend_mentions_strong_correlation():
+    correlated = RateEstimate(rate=0.12, low=0.05, high=0.19, intercept=0.0, n=60,
+                              rho=0.8, n_eff=6.7, dependence="auto")
+    assert describe_trend(correlated, quantity="Metal loss", unit="mm") == (
+        "Metal loss is rising about 0.12 mm/year (0.05 to 0.19). "
+        "Readings are strongly correlated in time, so the range is wide."
+    )
+    fc = _forecast(rate=correlated, time_to_cross=3.2, low=1.8, high=7.5)
+    assert describe_trend(fc, quantity="Metal loss", unit="mm") == (
+        "Metal loss is rising about 0.12 mm/year (0.05 to 0.19). "
+        "At this pace it reaches the 0.5 mm limit in about 3.2 years (1.8 to 7.5). "
+        "Readings are strongly correlated in time, so the range is wide."
+    )
+    mild = RateEstimate(rate=0.12, low=0.09, high=0.15, intercept=0.0, n=60, rho=0.3,
+                        n_eff=32.3, dependence="auto")
+    assert describe_trend(mild, quantity="Metal loss", unit="mm") == (
+        "Metal loss is rising about 0.12 mm/year (0.09 to 0.15)."
+    )

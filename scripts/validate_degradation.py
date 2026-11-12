@@ -15,7 +15,8 @@ Sections:
   5. power: how often a real change is found, by noise, effect size and outliers
   6. how false alarms and power vary with the BIC threshold (2, 6, 10, 15)
   7. rate- and forecast-interval coverage when the noise is correlated over
-     time (AR(1), rho 0.5 and 0.8), next to independent noise
+     time (AR(1), rho 0.5 and 0.8): old (dependence="independent") next to
+     new (dependence="auto"), plus change-point false alarms on correlated data
 """
 
 from __future__ import annotations
@@ -131,36 +132,42 @@ def threshold_sweep(runs: int) -> list[tuple[float, int, int, float, float]]:
     return rows
 
 
-def correlated_series(rho: float, seed: int, n: int = 60, noise: float = 0.02):
-    """Straight line (rate 0.1) plus AR(1) noise with total standard deviation ``noise``.
-
-    Each reading's error is ``rho`` times the previous one plus fresh noise;
-    the fresh part is scaled by sqrt(1 - rho**2) so the overall spread stays
-    ``noise`` whatever ``rho`` is. ``rho = 0`` is independent noise. No outliers.
-    """
-    line = simulate_series("constant", n=n, rate=0.1, noise=0.0, outlier_fraction=0.0)
-    rng = np.random.default_rng(seed)
-    errors = np.empty(n)
-    errors[0] = rng.normal(0.0, noise)
-    fresh = noise * np.sqrt(1.0 - rho**2)
-    for i in range(1, n):
-        errors[i] = rho * errors[i - 1] + rng.normal(0.0, fresh)
-    return line.times, line.values + errors
+def correlated_series(rho: float, seed: int, n: int = 60):
+    """Straight line (rate 0.1) plus AR(1) noise of overall SD 0.02, no outliers."""
+    return simulate_series("constant", n=n, rate=0.1, noise=0.02, ar1_rho=rho,
+                           outlier_fraction=0.0, seed=seed)
 
 
-def correlated_coverage(rho: float, runs_rate: int, runs_forecast: int) -> tuple[float, float]:
-    rate_hits = 0
+def correlated_coverage(rho: float, n: int, runs_rate: int, runs_forecast: int) -> dict:
+    """Coverage of both 95% intervals with dependence="independent" (old) and "auto" (new)."""
+    out = {"rate_old": 0, "rate_new": 0, "fc_old": 0, "fc_new": 0, "rho_hat": []}
     for k in range(runs_rate):
-        t, y = correlated_series(rho, seed=17_000 + k)
-        est = estimate_rate(t, y)
-        rate_hits += est.low <= 0.1 <= est.high
-    fc_hits = 0
+        s = correlated_series(rho, seed=50_000 + k, n=n)
+        old = estimate_rate(s.times, s.values, dependence="independent")
+        new = estimate_rate(s.times, s.values, dependence="auto")
+        out["rate_old"] += old.low <= 0.1 <= old.high
+        out["rate_new"] += new.low <= 0.1 <= new.high
+        out["rho_hat"].append(new.rho)
     for k in range(runs_forecast):
-        t, y = correlated_series(rho, seed=18_000 + k)
-        true_time = 1.5 / 0.1 - t[-1]
-        fc = time_to_threshold(t, y, threshold=1.5, horizon=50.0, n_boot=500, seed=18_000 + k)
-        fc_hits += fc.ok and fc.low <= true_time <= fc.high
-    return rate_hits / runs_rate, fc_hits / runs_forecast
+        s = correlated_series(rho, seed=51_000 + k, n=n)
+        true_time = 1.5 / 0.1 - s.times[-1]
+        for mode, key in (("independent", "fc_old"), ("auto", "fc_new")):
+            fc = time_to_threshold(s.times, s.values, threshold=1.5, horizon=50.0, n_boot=500,
+                                   seed=51_000 + k, dependence=mode)
+            out[key] += fc.ok and fc.low <= true_time <= fc.high
+    return {
+        "rate_old": out["rate_old"] / runs_rate, "rate_new": out["rate_new"] / runs_rate,
+        "fc_old": out["fc_old"] / runs_forecast, "fc_new": out["fc_new"] / runs_forecast,
+        "rho_hat": float(np.mean(out["rho_hat"])),
+    }
+
+
+def correlated_false_alarms(rho: float, runs: int) -> int:
+    """detect_rate_change on straight AR(1) data -- dependence is NOT handled there."""
+    return sum(
+        detect_rate_change(s.times, s.values, MIN_SEGMENT) is not None
+        for s in (correlated_series(rho, seed=52_000 + k) for k in range(runs))
+    )
 
 
 def main(argv=None) -> int:
@@ -216,14 +223,22 @@ def main(argv=None) -> int:
     print("   (power columns: change at t = 5 with no outliers; n = noise, r = rate after / before)\n")
 
     n_cr, n_cf = 1000 // scale, 500 // scale
-    print("7. Correlated noise: AR(1) from reading to reading, total noise SD 0.02, no outliers,")
-    print(f"   60 readings; rate interval {n_cr} runs, forecast interval {n_cf} runs per row")
-    print(f"   {'noise':>24} | {'rate 95% interval':>18} {'forecast 95% interval':>22}")
-    for rho, label in ((0.0, "independent (rho 0)"), (0.5, "correlated, rho 0.5"),
-                       (0.8, "correlated, rho 0.8")):
-        rate_cov, fc_cov = correlated_coverage(rho, n_cr, n_cf)
-        print(f"   {label:>24} | {pct(rate_cov):>18} {pct(fc_cov):>22}")
-    print("   (both intervals assume independent noise; correlated noise makes them too narrow)")
+    print("7. Correlated noise: AR(1) from reading to reading, total noise SD 0.02, no outliers;")
+    print(f"   rate interval {n_cr} runs, forecast interval {n_cf} runs per row (seeds 50000+)")
+    print("   old = dependence='independent', new = dependence='auto' (the default)")
+    print(f"   {'':>20} {'':>5} | {'rate 95% interval':^19} | {'forecast 95% interval':^21} | {'mean':>5}")
+    print(f"   {'noise':>20} {'n':>5} | {'old':>9} {'new':>9} | {'old':>10} {'new':>10} | {'rho^':>5}")
+    for rho, n, label in ((0.0, 60, "independent (rho 0)"), (0.5, 60, "rho 0.5"),
+                          (0.8, 60, "rho 0.8"), (0.8, 30, "rho 0.8")):
+        c = correlated_coverage(rho, n, n_cr, n_cf)
+        print(f"   {label:>20} {n:>5} | {pct(c['rate_old']):>9} {pct(c['rate_new']):>9} | "
+              f"{pct(c['fc_old']):>10} {pct(c['fc_new']):>10} | {c['rho_hat']:>5.2f}")
+    print("   (target 95%; 'new' estimates rho from the residuals and widens both intervals")
+    print("    by sqrt(n / n_eff), n_eff = n (1 - rho) / (1 + rho))")
+    n_cfa = 500 // scale
+    print(f"   Not handled: detect_rate_change on straight correlated data, {n_cfa} runs each --")
+    print("   false changes reported: " + ", ".join(
+        f"rho {rho}: {correlated_false_alarms(rho, n_cfa)}/{n_cfa}" for rho in (0.0, 0.5, 0.8)))
 
     print(f"\n(done in {time.monotonic() - start:.0f} s)")
     return 0
