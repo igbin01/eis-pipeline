@@ -16,7 +16,9 @@ Sections:
   6. how false alarms and power vary with the BIC threshold (2, 6, 10, 15)
   7. rate- and forecast-interval coverage when the noise is correlated over
      time (AR(1), rho 0.5 and 0.8): old (dependence="independent") next to
-     new (dependence="auto"), plus change-point false alarms on correlated data
+     new (dependence="auto")
+  8. change detection with correlated noise: false changes and power, old vs new
+  9. short series (10-30 readings): estimated rho, interval width and coverage
 """
 
 from __future__ import annotations
@@ -162,12 +164,59 @@ def correlated_coverage(rho: float, n: int, runs_rate: int, runs_forecast: int) 
     }
 
 
-def correlated_false_alarms(rho: float, runs: int) -> int:
-    """detect_rate_change on straight AR(1) data -- dependence is NOT handled there."""
+def correlated_false_alarms(rho: float, runs: int, mode: str) -> int:
+    """detect_rate_change on straight AR(1) data, 60 readings, no outliers."""
     return sum(
-        detect_rate_change(s.times, s.values, MIN_SEGMENT) is not None
-        for s in (correlated_series(rho, seed=52_000 + k) for k in range(runs))
+        detect_rate_change(s.times, s.values, MIN_SEGMENT, dependence=mode) is not None
+        for s in (correlated_series(rho, seed=80_000 + k) for k in range(runs))
     )
+
+
+def correlated_power(rho: float, noise: float, ratio: float, runs: int) -> dict:
+    """Share of runs where a mid-series change is found, old vs new mode."""
+    found = {"independent": 0, "auto": 0}
+    for k in range(runs):
+        s = simulate_series("step", rate=0.1, rate_after=0.1 * ratio, change_time=5.0,
+                            noise=noise, ar1_rho=rho, outlier_fraction=0.0, seed=81_000 + k)
+        for mode in found:
+            found[mode] += found_change(
+                detect_rate_change(s.times, s.values, MIN_SEGMENT, dependence=mode))
+    return {mode: hits / runs for mode, hits in found.items()}
+
+
+def found_change(change, true_time: float = 5.0) -> bool:
+    return change is not None and abs(change.time - true_time) <= 1.0
+
+
+def short_series(n: int, rho: float, runs: int) -> dict:
+    """estimate_rate / time_to_threshold with "auto" vs "independent" on short series."""
+    acc = {"rho": [], "rate_w": [], "fc_w": [], "rate_auto": 0, "rate_ind": 0,
+           "fc_auto": 0, "fc_ind": 0, "fc_runs": 0}
+    for k in range(runs):
+        s = simulate_series("constant", n=n, rate=0.1, ar1_rho=rho, outlier_fraction=0.0,
+                            seed=90_000 + k)
+        auto = estimate_rate(s.times, s.values)
+        ind = estimate_rate(s.times, s.values, dependence="independent")
+        acc["rho"].append(auto.rho)
+        acc["rate_w"].append((auto.high - auto.low) / (ind.high - ind.low))
+        acc["rate_auto"] += auto.low <= 0.1 <= auto.high
+        acc["rate_ind"] += ind.low <= 0.1 <= ind.high
+        true_time = 1.5 / 0.1 - s.times[-1]
+        fa = time_to_threshold(s.times, s.values, threshold=1.5, horizon=200.0, n_boot=300,
+                               seed=90_000 + k)
+        fi = time_to_threshold(s.times, s.values, threshold=1.5, horizon=200.0, n_boot=300,
+                               seed=90_000 + k, dependence="independent")
+        acc["fc_auto"] += fa.ok and fa.low <= true_time <= fa.high
+        acc["fc_ind"] += fi.ok and fi.low <= true_time <= fi.high
+        if fa.ok and fi.ok and np.isfinite(fa.high) and np.isfinite(fi.high):
+            acc["fc_w"].append((fa.high - fa.low) / (fi.high - fi.low))
+    finite_rho = [r for r in acc["rho"] if np.isfinite(r)]
+    return {
+        "rho": float(np.mean(finite_rho)) if finite_rho else float("nan"),
+        "rate_w": float(np.mean(acc["rate_w"])), "fc_w": float(np.mean(acc["fc_w"])),
+        "rate_auto": acc["rate_auto"] / runs, "rate_ind": acc["rate_ind"] / runs,
+        "fc_auto": acc["fc_auto"] / runs, "fc_ind": acc["fc_ind"] / runs,
+    }
 
 
 def main(argv=None) -> int:
@@ -234,11 +283,47 @@ def main(argv=None) -> int:
         print(f"   {label:>20} {n:>5} | {pct(c['rate_old']):>9} {pct(c['rate_new']):>9} | "
               f"{pct(c['fc_old']):>10} {pct(c['fc_new']):>10} | {c['rho_hat']:>5.2f}")
     print("   (target 95%; 'new' estimates rho from the residuals and widens both intervals")
-    print("    by sqrt(n / n_eff), n_eff = n (1 - rho) / (1 + rho))")
-    n_cfa = 500 // scale
-    print(f"   Not handled: detect_rate_change on straight correlated data, {n_cfa} runs each --")
-    print("   false changes reported: " + ", ".join(
-        f"rho {rho}: {correlated_false_alarms(rho, n_cfa)}/{n_cfa}" for rho in (0.0, 0.5, 0.8)))
+    print("    by sqrt(n / n_eff), n_eff = n (1 - rho) / (1 + rho))\n")
+
+    n_cfa, n_cpw = 500 // scale, 200 // scale
+    print("8. Change detection with correlated noise (detect_rate_change, AR(1), no outliers,")
+    print("   60 readings); old = dependence='independent', new = 'auto' (the default)")
+    print(f"   False changes on straight data, {n_cfa} runs each (target: <= 5% at rho 0.5,"
+          " <= 10% at rho 0.8):")
+    print(f"   {'rho':>5} | {'old':>9} {'new':>9}")
+    for rho in (0.0, 0.5, 0.8):
+        old = correlated_false_alarms(rho, n_cfa, "independent")
+        new = correlated_false_alarms(rho, n_cfa, "auto")
+        print(f"   {rho:>5} | {f'{old}/{n_cfa}':>9} {f'{new}/{n_cfa}':>9}")
+    print(f"   Power: change at t = 5 found within +-1 time unit, {n_cpw} runs each")
+    print(f"   {'noise':>6} {'ratio':>6} | {'rho 0':^15} | {'rho 0.5':^15} | {'rho 0.8':^15}")
+    print(f"   {'':>6} {'':>6} | {'old':>7} {'new':>7} | {'old':>7} {'new':>7} | {'old':>7} {'new':>7}")
+    loss = {0.0: [], 0.5: [], 0.8: []}
+    for noise in NOISES:
+        for ratio in RATIOS:
+            cells = []
+            for rho in (0.0, 0.5, 0.8):
+                p = correlated_power(rho, noise, ratio, n_cpw)
+                loss[rho].append(p["independent"] - p["auto"])
+                cells.append(f"{pct(p['independent']):>7} {pct(p['auto']):>7}")
+            print(f"   {noise:>6.2f} {ratio:>6.2f} | " + " | ".join(cells))
+    print("   Power lost (old - new), mean / largest over the 9 cases: " + "; ".join(
+        f"rho {rho}: {100 * np.mean(v):.1f} / {100 * max(v):.1f} points" for rho, v in loss.items()))
+    print("   (with correlated noise 'old' also counts chance hits from its false changes)\n")
+
+    n_ss = 500 // scale
+    print(f"9. Short series (dependence='auto'), straight line, no outliers, {n_ss} runs each")
+    print("   width x = mean interval width relative to dependence='independent' on the same data")
+    print(f"   {'n':>3} {'rho':>4} | {'mean rho^':>9} | {'rate cov':>8} {'(indep)':>8} {'width x':>7} | "
+          f"{'fc cov':>7} {'(indep)':>8} {'width x':>7}")
+    for rho in (0.0, 0.5):
+        for n in (10, 15, 20, 30):
+            c = short_series(n, rho, n_ss)
+            print(f"   {n:>3} {rho:>4} | {c['rho']:>9.2f} | {pct(c['rate_auto']):>8} "
+                  f"{pct(c['rate_ind']):>8} {c['rate_w']:>7.2f} | {pct(c['fc_auto']):>7} "
+                  f"{pct(c['fc_ind']):>8} {c['fc_w']:>7.2f}")
+    print("   (target 95%; below 20 readings the intervals can be too narrow if readings are"
+          " correlated)")
 
     print(f"\n(done in {time.monotonic() - start:.0f} s)")
     return 0

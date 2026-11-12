@@ -634,3 +634,96 @@ def test_describe_trend_mentions_strong_correlation():
     assert describe_trend(mild, quantity="Metal loss", unit="mm") == (
         "Metal loss is rising about 0.12 mm/year (0.09 to 0.15)."
     )
+
+
+# ---------------------------------------------------------------------------
+# detect_rate_change under correlated noise (dependence="auto", the default)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_independent_mode_reproduces_the_previous_results_exactly():
+    # recorded from the implementation before dependence= existed here
+    recorded = [
+        ("step", 7, {}, (6.271186440677965, 0.10340317436079931, -0.0007951833607399428,
+                         46.10452841715329, 38, 23, 0)),
+        ("step", 8, {"screen_outliers": True},
+         (5.932203389830509, 0.10058541513706871, 0.023624918449382845, 104.37258614078024,
+          36, 24, 1)),
+        ("constant", 9, {}, None),
+    ]
+    for kind, seed, kw, expected in recorded:
+        s = simulate_series(kind, seed=seed)
+        c = detect_rate_change(s.times, s.values, 5, dependence="independent", **kw)
+        got = None if c is None else (c.time, c.rate_before, c.rate_after, c.evidence,
+                                      c.n_before, c.n_after, c.n_screened)
+        assert got == expected, (kind, seed)
+
+
+def test_detect_reports_rho_and_mode():
+    import inspect
+
+    assert inspect.signature(detect_rate_change).parameters["dependence"].default == "auto"
+    s = simulate_series("step", rate=0.1, rate_after=0.0, change_time=5.0, noise=0.02,
+                        ar1_rho=0.5, outlier_fraction=0.0, seed=2)
+    auto = detect_rate_change(s.times, s.values, 5)
+    old = detect_rate_change(s.times, s.values, 5, dependence="independent")
+    assert auto is not None and old is not None
+    assert auto.dependence == "auto" and auto.rho > 0
+    assert (old.dependence, old.rho) == ("independent", 0.0)
+    assert auto.time == old.time  # same best split; only the evidence is discounted
+    assert auto.evidence < old.evidence
+    with pytest.raises(ValueError, match="dependence"):
+        detect_rate_change(s.times, s.values, 5, dependence="maybe")
+
+
+@pytest.mark.slow
+def test_detect_false_changes_on_straight_correlated_data():
+    # targets: at most 5% at rho 0.5 and 10% at rho 0.8 (60 readings, no outliers)
+    for rho, limit in ((0.5, 0.05), (0.8, 0.10)):
+        false = sum(
+            detect_rate_change(s.times, s.values, 5) is not None
+            for s in (simulate_series("constant", ar1_rho=rho, outlier_fraction=0.0, seed=k)
+                      for k in range(200))
+        )
+        assert false / 200 <= limit, (rho, false)
+
+
+@pytest.mark.slow
+def test_detect_auto_costs_little_power_with_independent_noise():
+    for noise, ratio in ((0.02, 0.75), (0.05, 0.5)):
+        found = {"auto": 0, "independent": 0}
+        for k in range(200):
+            s = simulate_series("step", rate=0.1, rate_after=0.1 * ratio, change_time=5.0,
+                                noise=noise, outlier_fraction=0.0, seed=k)
+            for mode in found:
+                c = detect_rate_change(s.times, s.values, 5, dependence=mode)
+                found[mode] += c is not None and abs(c.time - 5.0) <= 1.0
+        assert found["auto"] >= found["independent"] - 10, (noise, ratio, found)  # <= 5 points
+
+
+# ---------------------------------------------------------------------------
+# short series: the rho estimate must not swing wildly
+# ---------------------------------------------------------------------------
+
+
+def test_short_series_rho_estimate_is_stabilised():
+    widen = []
+    for k in range(300):
+        s = simulate_series("constant", n=10, outlier_fraction=0.0, seed=k)  # independent
+        auto = estimate_rate(s.times, s.values)
+        indep = estimate_rate(s.times, s.values, dependence="independent")
+        widen.append((auto.high - auto.low) / (indep.high - indep.low))
+    # unstabilised (n r1 + 2) / (n - 6) widened independent 10-point series ~1.9x
+    assert np.mean(widen) < 1.4
+
+
+def test_rho_estimator_unchanged_from_24_readings():
+    from eispipe.degradation import _lag1_correlation
+
+    rng = np.random.default_rng(11)
+    for n in (24, 30, 60):
+        e = rng.normal(size=n) + 0.6 * np.r_[0.0, rng.normal(size=n - 1)]
+        d = e - e.mean()
+        r1 = float(d[:-1] @ d[1:] / (d @ d))
+        expected = min(max((n * r1 + 2) / (n - 6), 0.0), 0.95)
+        assert _lag1_correlation(e, scale=1.0) == pytest.approx(expected, abs=1e-15)

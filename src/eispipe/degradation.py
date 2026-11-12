@@ -12,6 +12,19 @@ value units per time unit of ``times``; :func:`per_year` converts them.
 * :func:`simulate_series` -- synthetic series with known answers, for testing.
 * :func:`describe_trend` -- one plain-language sentence for a report.
 
+How to use these together: look for a change first, then estimate on the
+latest segment. A rate or forecast fitted across a change describes neither
+regime, and the bend makes the readings look correlated::
+
+    change = detect_rate_change(times, values, min_segment=5)
+    recent = times >= change.time if change else slice(None)
+    rate = estimate_rate(times[recent], values[recent])
+    forecast = time_to_threshold(times[recent], values[recent], limit, horizon)
+    print(describe_trend(forecast, quantity="Metal loss", unit="mm"))
+
+Use at least 20 readings in the segment you estimate on (see below), and
+treat a change reported close to either end of the series with caution.
+
 Assumptions shared by all functions (in plain language):
 
 * Correlation between neighbouring readings is handled by
@@ -23,13 +36,19 @@ Assumptions shared by all functions (in plain language):
   outliers) the 95% intervals then covered the truth in 94.1% (rate) and
   93.6% (forecast) of runs at rho 0.5 and 92.9% / 90.6% at rho 0.8 --
   against 76.6% / 72.2% and 49.8% / 45.0% with ``dependence="independent"``.
-  Short series stay somewhat optimistic (30 readings, rho 0.8: 89.3% /
-  86.0%). The model behind it is AR(1), each reading's scatter carrying over
-  part of the previous one's; slower, wandering drifts are not captured.
-* :func:`detect_rate_change` still assumes independent readings: on straight
-  correlated data it reported a false change in 23 of 500 runs at rho 0.5
-  and 170 of 500 at rho 0.8. Treat its result with caution when ``rho`` from
-  :func:`estimate_rate` is large.
+  The model behind it is AR(1), each reading's scatter carrying over part of
+  the previous one's; slower, wandering drifts are not captured.
+* :func:`detect_rate_change` also handles it by default: it discounts the
+  evidence for a change by n_eff / n when the correlation is detectable. On
+  straight correlated data false changes fell from 29 to 4 in 500 runs at
+  rho 0.5 and from 193 to 9 at rho 0.8; with independent readings it lost at
+  most half a point of power.
+* Short series: the intervals can be trusted from about 20 readings. With
+  fewer, ``rho`` is too uncertain to correct for correlation fully: at rho
+  0.5 the 95% intervals covered 88-90% (rate) and 84-88% (forecast) of runs
+  with 10-15 readings, and 92% / 89% with 20 (``scripts/validate_degradation.py``
+  section 9). Even at 20-60 readings the forecast interval at rho 0.5-0.8 is
+  a little too narrow (89-94%); at rho 0.8 and 30 readings, 86%.
 * Over the stretch of data used, the underlying change is a straight line
   (or, for :func:`detect_rate_change`, two straight lines joined at one point).
   Not handled: curved (nonlinear) trends, and a rate that changes inside the
@@ -162,7 +181,10 @@ class RateChange:
     against a single straight line (larger is stronger), and
     ``n_before``/``n_after`` the points in each segment (the point at the
     change belongs to both). ``n_screened`` is how many readings the optional
-    outlier screening left out (0 when screening is off).
+    outlier screening left out (0 when screening is off). ``rho`` is the
+    correlation between neighbouring readings estimated from the two-segment
+    fit's residuals, by which ``evidence`` was discounted (0 with
+    ``dependence="independent"``); ``dependence`` records the mode used.
     """
 
     time: float
@@ -172,6 +194,8 @@ class RateChange:
     n_before: int
     n_after: int
     n_screened: int = 0
+    rho: float = 0.0
+    dependence: str = "independent"
 
 
 @dataclass(frozen=True)
@@ -277,14 +301,29 @@ def _lag1_correlation(resid: np.ndarray, scale: float) -> float:
     (raw r1: 0.24, 0.43, 0.69). Negative values are set to 0 (they would only
     narrow the interval) and values above :data:`MAX_RHO` to that cap.
     Residuals at floating-point noise level count as independent (0).
+
+    Short series: the denominator is floored at ``0.75 * n``, i.e.
+    ``(n * r1 + 2) / max(n - 6, 0.75 n)``. Without the floor, 10 readings gave
+    ``(10 r1 + 2) / 4``, so noise in r1 was multiplied by 2.5: on independent
+    10-point series the estimate averaged 0.28 (SD 0.35) and widened the
+    intervals 1.9-fold for nothing; with the floor 0.17 (SD 0.23) and 1.3-fold.
+    The floor only acts below 24 readings, so longer series are unchanged.
     """
+    r1 = _raw_lag1(resid, scale)
+    if r1 is None:
+        return 0.0
+    n = resid.size
+    return min(max((n * r1 + 2.0) / max(n - 6.0, 0.75 * n), 0.0), MAX_RHO)
+
+
+def _raw_lag1(resid: np.ndarray, scale: float) -> float | None:
+    """Plain lag-1 autocorrelation r1, or ``None`` for residuals at noise level."""
     n = resid.size
     centred = resid - resid.mean()
     denom = float(centred @ centred)
     if math.sqrt(denom / n) <= 1e-9 * scale:
-        return 0.0
-    r1 = float(centred[:-1] @ centred[1:]) / denom
-    return min(max((n * r1 + 2.0) / (n - 6.0), 0.0), MAX_RHO)
+        return None
+    return float(centred[:-1] @ centred[1:]) / denom
 
 
 def _theil_sen(t: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -334,22 +373,15 @@ def estimate_rate(times, values, window=None, *, level=0.95, dependence="auto") 
     the slope by ``sqrt(n / n_eff)`` with ``n_eff = n (1 - rho) / (1 + rho)``,
     the variance inflation of AR(1) noise (TODO verify: effective sample size,
     e.g. von Storch and Zwiers (1999)). ``dependence="independent"`` gives the
-    previous interval unchanged.
-
-    Why this rule: it was compared by simulation with two alternatives. Putting
-    the same inflation into the variance of Kendall's statistic behind Sen's
-    interval (the idea of the Hamed and Rao (1998) correction; TODO verify)
-    covered similarly but made the interval about 10 times wider at rho 0.8,
-    because it reaches into the noisy extreme pairwise slopes; the AR(1) form
-    of the Hamed-Rao factor itself under-covered (90.2% at rho 0.8, 60
-    readings). Trend-free pre-whitening (Yue et al. (2002); TODO verify) is a
-    test of whether there is a trend, not an interval, so it does not apply.
+    previous interval unchanged. Alternatives that were tried and rejected are
+    recorded in ``docs/degradation_design.md``.
 
     How often the 95% interval contains the true rate
     (``scripts/validate_degradation.py``, 60 readings, straight-line trend):
     96.3% of 1000 runs with independent noise and 5% outliers; with AR(1)
     noise 94.1% at rho 0.5 and 92.9% at rho 0.8 ("independent": 76.6% and
-    49.8%).
+    49.8%). Trust it from about 20 readings: at rho 0.5 it covered 91.8% with
+    20 readings but 88.0-89.8% with 10-15.
 
     Assumptions: the change is a straight line over the readings used; the
     scatter's size does not change over time; any correlation is of the
@@ -415,6 +447,11 @@ def _sse(X: np.ndarray, y: np.ndarray) -> tuple[float, np.ndarray]:
     return float(resid @ resid), beta
 
 
+#: detect_rate_change discounts for correlation only when the lag-1
+#: autocorrelation of the two-segment residuals exceeds this many standard
+#: errors (1/sqrt(n) under independence): a one-sided 5% test.
+_RHO_GATE_Z = 1.645
+
 #: Outlier screening: neighbours on each side for the local median, and the
 #: cutoff in robust standard deviations (1.4826 * median absolute deviation).
 _SCREEN_HALF_WINDOW = 3
@@ -443,7 +480,7 @@ def _screen_outliers(t: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def detect_rate_change(
-    times, values, min_segment, *, min_bic_drop=10.0, screen_outliers=False
+    times, values, min_segment, *, min_bic_drop=10.0, screen_outliers=False, dependence="auto"
 ) -> RateChange | None:
     """Find one point where the rate changed, or return ``None``.
 
@@ -466,7 +503,32 @@ def detect_rate_change(
     and ``k`` the parameter count: 2 for one straight line (intercept, slope)
     and 4 for two joined segments (intercept, slope before, change of slope,
     change time). The noise variance is a parameter of both models, so it
-    cancels and is not counted. ``evidence`` is BIC(line) - BIC(segments).
+    cancels and is not counted. ``evidence`` is BIC(line) - BIC(segments):
+
+        evidence = n * ln(SSE_line / SSE_segments) - 2 * ln(n)
+
+    Correlated readings (``dependence="auto"``, the default): neighbouring
+    readings that share part of their scatter carry less information, so the
+    likelihood-ratio part is discounted by n_eff / n:
+
+        evidence = (1 - rho) / (1 + rho) * n * ln(SSE_line / SSE_segments) - 2 * ln(n)
+
+    ``rho`` is the bias-corrected lag-1 autocorrelation (as in
+    :func:`estimate_rate`) of the *two-segment* fit's residuals -- the line's
+    residuals would read a real bend as correlation and hide every change. It
+    is used only if the plain lag-1 autocorrelation of those residuals is
+    above 1.645 / sqrt(n) (a one-sided 5% test); otherwise ``rho`` is 0 and
+    nothing is discounted. Without that test, small chance correlations on
+    independent data cost up to 6.5 points of power for nothing.
+    ``dependence="independent"`` is the previous behaviour, unchanged. On
+    straight AR(1) data (60 readings, no outliers, 500 runs) false changes
+    fell from 29 to 4 at rho 0.5 and from 193 to 9 at rho 0.8; with
+    independent readings power changed by at most 0.5 points. With correlated
+    readings power is lower than the old figures, which partly counted chance
+    hits: e.g. a halving at noise 0.02 is found in 92.5% of runs at rho 0.5
+    and 52.5% at rho 0.8 (old: 98% and 90%). The alternative of fitting AR(1)
+    errors in both models (Prais-Winsten) had similar false-alarm rates but
+    less power; see ``docs/degradation_design.md``.
 
     A change is reported only if that drop is at least ``min_bic_drop``
     (default 10). The value was chosen from simulation, not taken from a
@@ -475,8 +537,8 @@ def detect_rate_change(
     screening): threshold 2 gave 6 false changes without outliers and 25 with
     5% outliers; 6 gave 0 and 13; 10 gave 0 and 3; 15 gave 0 and 2. Raising
     it from 6 to 10 cost no power for a moderate change (rate to 0.75x at
-    noise 0.02: 92.8% found at both); 15 cut power for a weak one (rate
-    halving at noise 0.05: 79% at 10, 65% at 15).
+    noise 0.02: 92.4% found at both); 15 cut power for a weak one (rate
+    halving at noise 0.05: 78% at 10, 64% at 15).
 
     ``screen_outliers=True`` (off by default) first drops readings that sit
     far from their neighbours: the overall Theil-Sen line is removed, each
@@ -492,7 +554,7 @@ def detect_rate_change(
 
     * Without outliers, a rate that drops to a quarter or to half is found in
       every run at noise 0.01 and 0.02; at noise 0.05 in 97% (quarter) and
-      78% (half). A drop to three quarters is found in 100%, 94% and 5% of
+      77% (half). A drop to three quarters is found in 100%, 93% and 4.5% of
       runs at noise 0.01, 0.02 and 0.05 -- too small to see at high noise.
     * With 5% outliers and no screening, power falls sharply: a halving at
       noise 0.02 is found in 77% of runs, a drop to a quarter at noise 0.05
@@ -503,17 +565,15 @@ def detect_rate_change(
     * False changes on straight data with 5% outliers: 6 in 500 without
       screening, 0 in 500 with it; without outliers, 1 in 500 either way.
 
-    Assumptions: at most one change; straight segments; independent scatter
-    with the same spread throughout. Without screening, a few wild readings
-    can create or hide a change. Correlated readings are not allowed for
-    here: on straight data with AR(1) noise it reported a false change in 23
-    of 500 runs at rho 0.5 and 170 of 500 at rho 0.8
-    (``scripts/validate_degradation.py``). If :func:`estimate_rate` reports
-    a large ``rho``, treat a detected change with caution.
+    Assumptions: at most one change; straight segments; scatter with the same
+    spread throughout, independent or AR(1)-correlated. Without screening, a
+    few wild readings can create or hide a change. With fewer than
+    :data:`MIN_POINTS_FOR_RHO` readings no correlation is estimated.
 
     Raises ``ValueError`` if ``min_segment < 3`` or there are fewer than
     ``2 * min_segment`` readings.
     """
+    _check_dependence(dependence)
     t, y = _series(times, values)
     if int(min_segment) != min_segment or min_segment < MIN_POINTS:
         raise ValueError(f"min_segment must be an integer >= {MIN_POINTS}, got {min_segment!r}")
@@ -554,7 +614,26 @@ def detect_rate_change(
 
     drop = bic(sse_line, 2) - bic(sse_hinge, 4)
     if drop < min_bic_drop:
-        return None
+        return None  # not even plausible as if readings were independent
+    rho = 0.0
+    if dependence == "auto" and n >= MIN_POINTS_FOR_RHO:
+        # A change is plausible, so the two-segment fit is the better model:
+        # its residuals are free of the bend that would masquerade as
+        # correlation in the line's residuals.
+        hinge = np.maximum(0.0, t - t[k])
+        resid = y - np.column_stack([ones, tc, hinge]) @ beta
+        r1 = _raw_lag1(resid, scale)
+        # Discount only for correlation that is detectably there (one-sided
+        # 5%): small positive estimates on independent data would otherwise
+        # cost power for nothing.
+        if r1 is not None and r1 > _RHO_GATE_Z / math.sqrt(n):
+            rho = _lag1_correlation(resid, scale)
+        # Correlated readings carry n_eff/n of the information: discount the
+        # likelihood-ratio part of the BIC drop accordingly; the penalty stays.
+        likelihood_ratio = drop + 2.0 * math.log(n)
+        drop = (1.0 - rho) / (1.0 + rho) * likelihood_ratio - 2.0 * math.log(n)
+        if drop < min_bic_drop:
+            return None
     return RateChange(
         time=float(t[k]),
         rate_before=float(beta[1]),
@@ -563,6 +642,8 @@ def detect_rate_change(
         n_before=k + 1,
         n_after=n - k,
         n_screened=n_screened,
+        rho=float(rho),
+        dependence=dependence,
     )
 
 
@@ -611,17 +692,11 @@ def time_to_threshold(
     With AR(1) noise (60 readings, no outliers, straight-line trend) the 95%
     interval contained the true crossing time in 93.6% of runs at rho 0.5 and
     90.6% at rho 0.8 ("independent": 72.2% and 45.0%), and 94.6% for
-    independent noise; with 30 readings at rho 0.8, 86.0%.
-
-    Why not a block bootstrap: a moving-block bootstrap of the residuals
-    (Kuensch (1989); block length from rho by the AR(1) rule
-    (2 rho / (1 - rho**2))**(2/3) * n**(1/3), Carlstein (1986); both TODO
-    verify) was tried first and covered only 85% at rho 0.5 and 66% at
-    rho 0.8 with 60 readings -- too few blocks to reproduce the spread. An
-    AR(1) sieve bootstrap (resampling innovations and rebuilding the
-    correlated residuals; Kreiss (1992), Buehlmann (1997); TODO verify) met the
-    targets but was slightly less accurate than the stretch at every
-    correlation tried (e.g. 90.2% vs 90.8% at rho 0.8).
+    independent noise; with 30 readings at rho 0.8, 86.0%. Trust it from
+    about 20 readings: at rho 0.5 it covered 89.4% with 20 readings and
+    84.2-88.2% with 10-15. A block bootstrap and an AR(1) sieve bootstrap were
+    tried instead of the stretch and rejected; see
+    ``docs/degradation_design.md``.
 
     No number is given -- ``time_to_cross`` is ``None`` and ``reason`` says
     why -- when there are too few readings, the rate is not significantly
